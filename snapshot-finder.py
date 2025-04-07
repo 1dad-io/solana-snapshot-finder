@@ -14,6 +14,7 @@ from requests import ReadTimeout, ConnectTimeout, HTTPError, Timeout, Connection
 from tqdm import tqdm
 from multiprocessing.dummy import Pool as ThreadPool
 import statistics
+import socket
 
 parser = argparse.ArgumentParser(description='Solana snapshot finder')
 parser.add_argument('-t', '--threads-count', default=1000, type=int,
@@ -44,6 +45,10 @@ parser.add_argument('-ipb', '--ip_blacklist', default='', type=str, help='Comma 
 parser.add_argument('-b', '--blacklist', default='', type=str, help='If the same corrupted archive is constantly downloaded, you can exclude it.'
                     ' Specify either the number of the slot you want to exclude, or the hash of the archive name. '
                     'You can specify several, separated by commas. Example: -b 135501350,135501360 or --blacklist 135501350,some_hash')
+
+parser.add_argument('--internal_rpc_nodes', default='', type=str, help='Comma separated list of internal RPC nodes (ip:port) that will be included in the scan. '
+                    'Example: --internal_rpc_nodes solana-nvme.solana.svc.cluster.local.:8899')
+
 parser.add_argument("-v", "--verbose", help="increase output verbosity to DEBUG", action="store_true")
 args = parser.parse_args()
 
@@ -66,6 +71,7 @@ NUM_OF_ATTEMPTS = 1
 SORT_ORDER = args.sort_order
 BLACKLIST = str(args.blacklist).split(",")
 IP_BLACKLIST = str(args.ip_blacklist).split(",")
+INTERNAL_RPC_NODES = str(args.internal_rpc_nodes).split(",")
 FULL_LOCAL_SNAP_SLOT = 0
 
 current_slot = 0
@@ -102,6 +108,42 @@ else:
     )
 logger = logging.getLogger(__name__)
 
+
+# Function to resolve domain names to IP addresses
+def resolve_domain(domain):
+    """
+    Resolves domain to IP address using Python's socket module
+    Returns a list of IP addresses for the domain
+    """
+    logger.debug(f"Resolving domain: {domain}")
+    try:
+        # Check if we have a domain (not an IP address)
+        if not domain[0].isdigit():
+            try:
+                # First, try to get all addresses using getaddrinfo
+                # This can return multiple IP addresses for a single domain
+                addrinfo = socket.getaddrinfo(domain, None)
+                # Extract unique IP addresses
+                ips = list(set(info[4][0] for info in addrinfo if info[0] == socket.AF_INET))
+                
+                if ips:
+                    logger.debug(f"Resolved {domain} to {ips}")
+                    return ips
+                else:
+                    # Fallback to basic gethostbyname if no IPv4 addresses found
+                    ip = socket.gethostbyname(domain)
+                    logger.debug(f"Resolved {domain} to {ip} using gethostbyname")
+                    return [ip]
+            except socket.gaierror as e:
+                logger.warning(f"Could not resolve {domain}: {e}")
+                return [domain]  # Return original domain if resolution fails
+        else:
+            # It's already an IP, return as is
+            return [domain]
+    except Exception as e:
+        logger.warning(f"Failed to resolve domain {domain}: {e}")
+        # Return original domain if resolution fails
+        return [domain]
 
 def convert_size(size_bytes):
    if size_bytes == 0:
@@ -210,6 +252,32 @@ def get_all_rpc_ips():
                 rpc_ips.append(f'{gossip_ip}:8899')
 
         rpc_ips = list(set(rpc_ips))
+        
+        # Add internal RPC nodes if provided
+        if INTERNAL_RPC_NODES is not None:
+            logger.info(f'Processing {len(INTERNAL_RPC_NODES)} internal RPC nodes: {INTERNAL_RPC_NODES}')
+            
+            # Process each internal node to resolve domains to IPs
+            for node in INTERNAL_RPC_NODES:
+                # Check if this is a host:port format
+                if ":" in node:
+                    host, port = node.split(":")
+                    resolved_ips = resolve_domain(host)
+                    # Add each resolved IP with the original port
+                    for ip in resolved_ips:
+                        resolved_node = f"{ip}:{port}"
+                        logger.info(f'Added resolved node: {resolved_node} (from {node})')
+                        rpc_ips.append(resolved_node)
+                else:
+                    # No port specified, use default port 8899
+                    resolved_ips = resolve_domain(node)
+                    for ip in resolved_ips:
+                        resolved_node = f"{ip}:8899"
+                        logger.info(f'Added resolved node with default port: {resolved_node} (from {node})')
+                        rpc_ips.append(resolved_node)
+            
+            rpc_ips = list(set(rpc_ips))  # Remove duplicates
+            
         logger.debug(f'RPC_IPS LEN before blacklisting {len(rpc_ips)}')
         # removing blacklisted ip addresses
         if IP_BLACKLIST is not None:
