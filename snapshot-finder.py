@@ -18,23 +18,23 @@ import socket
 
 parser = argparse.ArgumentParser(description='Solana snapshot finder')
 parser.add_argument('-t', '--threads-count', default=1000, type=int, help='The number of concurrently running threads that check snapshots for rpc nodes')
-parser.add_argument('-r', '--rpc_address', default='https://api.mainnet-beta.solana.com', type=str, help='RPC address of the node from which the current slot number will be taken. Default: https://api.mainnet-beta.solana.com')
+parser.add_argument('-r', '--rpc-address', default='https://api.mainnet-beta.solana.com', type=str, help='RPC address of the node from which the current slot number will be taken. Default: https://api.mainnet-beta.solana.com')
 parser.add_argument('--slot', default=0, type=int, help='Search for a snapshot with a specific slot number (useful for network restarts)')
 parser.add_argument('--version', default=None, help='Search for a snapshot from a specific version node')
-parser.add_argument('--wildcard_version', default=None, help='Search for a snapshot with a major / minor version e.g. 1.18 (excluding .23)')
-parser.add_argument('--max_snapshot_age', default=1300, type=int, help='How many slots ago the snapshot was created (in slots)')
-parser.add_argument('--min_download_speed', default=60, type=int, help='Minimum average snapshot download speed in megabytes')
-parser.add_argument('--max_download_speed', type=int, help='Maximum snapshot download speed in megabytes. Example: --max_download_speed 192')
-parser.add_argument('--max_latency', default=100, type=int, help='The maximum value of latency (milliseconds). If latency > max_latency --> skip')
-parser.add_argument('--with_private_rpc', action='store_true', help='Enable adding and checking RPCs with the --private-rpc option. This slow down checking and searching but potentially increases the number of RPCs from which snapshots can be downloaded.')
-parser.add_argument('--measurement_time', default=7, type=int, help='Time in seconds during which the script will measure the download speed')
-parser.add_argument('--snapshot_path', type=str, default='.', help='The location where the snapshot will be downloaded (absolute path). Example: /home/ubuntu/solana/validator-ledger')
-parser.add_argument('--num_of_retries', default=5, type=int, help='The number of retries if a suitable server for downloading the snapshot was not found')
+parser.add_argument('--wildcard-version', default=None, help='Search for a snapshot with a major / minor version e.g. 1.18 (excluding .23)')
+parser.add_argument('--max-snapshot-age', default=1300, type=int, help='How many slots ago the snapshot was created (in slots)')
+parser.add_argument('--min-download-speed', default=60, type=int, help='Minimum average snapshot download speed in megabytes')
+parser.add_argument('--max-download-speed', type=int, help='Maximum snapshot download speed in megabytes. Example: --max-download-speed 192')
+parser.add_argument('--max-latency', default=100, type=int, help='The maximum value of latency (milliseconds). If latency > max_latency --> skip')
+parser.add_argument('--with-private-rpc', action='store_true', help='Enable adding and checking RPCs with the --private-rpc option. This slow down checking and searching but potentially increases the number of RPCs from which snapshots can be downloaded.')
+parser.add_argument('--measurement-time', default=7, type=int, help='Time in seconds during which the script will measure the download speed')
+parser.add_argument('--snapshot-path', type=str, default='.', help='The location where the snapshot will be downloaded (absolute path). Example: /home/ubuntu/solana/validator-ledger')
+parser.add_argument('--num-of-retries', default=5, type=int, help='The number of retries if a suitable server for downloading the snapshot was not found')
 parser.add_argument('--sleep', default=7, type=int, help='Sleep before next retry (seconds)')
-parser.add_argument('--sort_order', default='latency', type=str, help='Priority way to sort the found servers. latency or slots_diff')
-parser.add_argument('-ipb', '--ip_blacklist', default='', type=str, help='Comma separated list of ip addresse (ip:port) that will be excluded from the scan. Example: -ipb 1.1.1.1:8899,8.8.8.8:8899')
+parser.add_argument('--sort-order', default='latency', type=str, help='Priority way to sort the found servers. latency or slots_diff')
+parser.add_argument('-ipb', '--ip-blacklist', default='', type=str, help='Comma separated list of ip addresse (ip:port) that will be excluded from the scan. Example: -ipb 1.1.1.1:8899,8.8.8.8:8899')
 parser.add_argument('-b', '--blacklist', default='', type=str, help='If the same corrupted archive is constantly downloaded, you can exclude it. Specify either the number of the slot you want to exclude, or the hash of the archive name. You can specify several, separated by commas. Example: -b 135501350,135501360 or --blacklist 135501350,some_hash')
-parser.add_argument('--internal_rpc_nodes', default='', type=str, help='Comma separated list of internal RPC nodes (ip:port) that will be included in the scan. Example: --internal_rpc_nodes solana-nvme.solana.svc.cluster.local.:8899')
+parser.add_argument('--internal-rpc-nodes', default='', type=str, help='Comma separated list of internal RPC nodes (ip:port) that will be included in the scan. Example: --internal-rpc-nodes solana-nvme.solana.svc.cluster.local.:8899')
 parser.add_argument('-v', '--verbose', help='Increase output verbosity to DEBUG', action='store_true')
 args = parser.parse_args()
 
@@ -499,7 +499,7 @@ def main_worker():
 
         if best_snapshot_node is {}:
             logger.error(f'No snapshot nodes were found matching the given parameters:{args.min_download_speed=}'
-                  f'\nTry restarting the script with --with_private_rpc'
+                  f'\nTry restarting the script with --with-private-rpc'
                   f'RETRY #{NUM_OF_ATTEMPTS}\\{NUM_OF_MAX_ATTEMPTS}')
             return 1
 
@@ -565,7 +565,7 @@ while NUM_OF_ATTEMPTS <= NUM_OF_MAX_ATTEMPTS:
         exit(0)
 
     if worker_result != 0:
-        logger.info("Now trying with flag --with_private_rpc")
+        logger.info("Now trying with flag --with-private-rpc")
         WITH_PRIVATE_RPC = True
 
     if NUM_OF_ATTEMPTS >= NUM_OF_MAX_ATTEMPTS:

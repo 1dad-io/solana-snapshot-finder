@@ -22,39 +22,39 @@ options:
   -h, --help            show this help message and exit
   -t, --threads-count THREADS_COUNT
                         The number of concurrently running threads that check snapshots for rpc nodes
-  -r, --rpc_address RPC_ADDRESS
+  -r, --rpc-address RPC_ADDRESS
                         RPC address of the node from which the current slot number will be taken. Default: https://api.mainnet-beta.solana.com
   --slot SLOT           Search for a snapshot with a specific slot number (useful for network restarts)
   --version VERSION     Search for a snapshot from a specific version node
-  --wildcard_version WILDCARD_VERSION
+  --wildcard-version WILDCARD_VERSION
                         Search for a snapshot with a major / minor version e.g. 1.18 (excluding .23)
-  --max_snapshot_age MAX_SNAPSHOT_AGE
+  --max-snapshot-age MAX_SNAPSHOT_AGE
                         How many slots ago the snapshot was created (in slots)
-  --min_download_speed MIN_DOWNLOAD_SPEED
+  --min-download-speed MIN_DOWNLOAD_SPEED
                         Minimum average snapshot download speed in megabytes
-  --max_download_speed MAX_DOWNLOAD_SPEED
-                        Maximum snapshot download speed in megabytes. Example: --max_download_speed 192
-  --max_latency MAX_LATENCY
+  --max-download-speed MAX_DOWNLOAD_SPEED
+                        Maximum snapshot download speed in megabytes. Example: --max-download-speed 192
+  --max-latency MAX_LATENCY
                         The maximum value of latency (milliseconds). If latency > max_latency --> skip
-  --with_private_rpc    Enable adding and checking RPCs with the --private-rpc option. This slow down checking and searching but potentially increases
+  --with-private-rpc    Enable adding and checking RPCs with the --private-rpc option. This slow down checking and searching but potentially increases
                         the number of RPCs from which snapshots can be downloaded.
-  --measurement_time MEASUREMENT_TIME
+  --measurement-time MEASUREMENT_TIME
                         Time in seconds during which the script will measure the download speed
-  --snapshot_path SNAPSHOT_PATH
+  --snapshot-path SNAPSHOT_PATH
                         The location where the snapshot will be downloaded (absolute path). Example: /home/ubuntu/solana/validator-ledger
-  --num_of_retries NUM_OF_RETRIES
+  --num-of-retries NUM_OF_RETRIES
                         The number of retries if a suitable server for downloading the snapshot was not found
   --sleep SLEEP         Sleep before next retry (seconds)
-  --sort_order SORT_ORDER
+  --sort-order SORT_ORDER
                         Priority way to sort the found servers. latency or slots_diff
-  -ipb, --ip_blacklist IP_BLACKLIST
+  -ipb, --ip-blacklist IP_BLACKLIST
                         Comma separated list of ip addresse (ip:port) that will be excluded from the scan. Example: -ipb 1.1.1.1:8899,8.8.8.8:8899
   -b, --blacklist BLACKLIST
                         If the same corrupted archive is constantly downloaded, you can exclude it. Specify either the number of the slot you want to
                         exclude, or the hash of the archive name. You can specify several, separated by commas. Example: -b 135501350,135501360 or
                         --blacklist 135501350,some_hash
-  --internal_rpc_nodes INTERNAL_RPC_NODES
-                        Comma separated list of internal RPC nodes (ip:port) that will be included in the scan. Example: --internal_rpc_nodes solana-
+  --internal-rpc-nodes INTERNAL_RPC_NODES
+                        Comma separated list of internal RPC nodes (ip:port) that will be included in the scan. Example: --internal-rpc-nodes solana-
                         nvme.solana.svc.cluster.local.:8899
   -v, --verbose         Increase output verbosity to DEBUG
 ```
@@ -75,13 +75,13 @@ sudo apt-get update \
 Start script  
 Mainnet  
 ```python
-python3 snapshot-finder.py --snapshot_path $HOME/solana/validator-ledger
+python3 snapshot-finder.py --snapshot-path $HOME/solana/validator-ledger
 ``` 
 `$HOME/solana/validator-ledger/` - path to your `validator-ledger`
 
 Testnet  
 ```python
-python3 snapshot-finder.py --snapshot_path $HOME/solana/validator-ledger -r http://api.testnet.solana.com
+python3 snapshot-finder.py --snapshot-path $HOME/solana/validator-ledger -r http://api.testnet.solana.com
 ``` 
 
 ### Run via docker  
@@ -92,7 +92,7 @@ sudo docker run -it --rm \
 -v ~/solana/validator-ledger:/solana/snapshot \
 --user $(id -u):$(id -g) \
 1dad-io/solana-snapshot-finder:latest \
---snapshot_path /solana/snapshot
+--snapshot-path /solana/snapshot
 ```
 *`~/solana/validator-ledger` - path to validator-ledger, where snapshots stored*
 
@@ -103,7 +103,7 @@ sudo docker run -it --rm \
 -v ~/solana/validator-ledger:/solana/snapshot \
 --user $(id -u):$(id -g) \
 1dad-io/solana-snapshot-finder:latest \
---snapshot_path /solana/snapshot \
+--snapshot-path /solana/snapshot \
 -r http://api.testnet.solana.com
 ```
 
