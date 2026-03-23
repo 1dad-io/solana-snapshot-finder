@@ -44,6 +44,13 @@ DEFAULT_RPC_ADDRESS = "https://api.mainnet-beta.solana.com"
 DEFAULT_SPEED_TEST_LIMIT = 15
 
 
+class DownloadError(RuntimeError):
+    def __init__(self, message: str, *, url: str, returncode: Optional[int] = None) -> None:
+        super().__init__(message)
+        self.url = url
+        self.returncode = returncode
+
+
 @dataclass(slots=True)
 class Config:
     threads_count: int
@@ -264,6 +271,8 @@ class SnapshotFinder:
         return 1
 
     def _download_candidate_files(self, candidate: SnapshotCandidate, state: ScanState) -> None:
+        full_downloaded_in_this_run = False
+
         for relative_path in candidate.files_to_download:
             file_info = parse_snapshot_filename(relative_path)
 
@@ -277,8 +286,40 @@ class SnapshotFinder:
 
             download_url = self._build_download_url(candidate.snapshot_address, relative_path)
             target_dir = self.get_download_dir(file_info)
+
+            if file_info.kind == "incremental":
+                if not self._snapshot_file_still_available(download_url):
+                    self.logger.warning(
+                        "Incremental snapshot disappeared before download; keeping the available full snapshot and skipping %s",
+                        download_url,
+                    )
+                    continue
+
             self.logger.info("Downloading %s to %s", download_url, target_dir)
-            self.download(download_url, target_dir)
+
+            try:
+                self.download(download_url, target_dir)
+            except DownloadError as exc:
+                if file_info.kind == "incremental" and (full_downloaded_in_this_run or state.local_full_snapshot_is_usable):
+                    self.logger.warning(
+                        "Incremental snapshot became unavailable during download; keeping the full snapshot and skipping %s (%s)",
+                        exc.url,
+                        exc,
+                    )
+                    continue
+                raise
+
+            if file_info.kind == "full":
+                full_downloaded_in_this_run = True
+
+    def _snapshot_file_still_available(self, download_url: str) -> bool:
+        response = self.do_request(url=download_url, method="head", timeout=3, stats=None)
+        if not isinstance(response, requests.Response):
+            return False
+        if response.status_code >= 400:
+            return False
+        return True
+
 
     def inspect_rpc_node(self, state: ScanState, rpc_address: str) -> None:
         self._progress_update(1)
@@ -631,7 +672,11 @@ class SnapshotFinder:
 
         result = subprocess.run(command, stdout=subprocess.PIPE, universal_newlines=True)
         if result.returncode != 0:
-            raise RuntimeError(f"wget exited with non-zero code {result.returncode}")
+            raise DownloadError(
+                f"wget exited with non-zero code {result.returncode}",
+                url=url,
+                returncode=result.returncode,
+            )
 
         self.logger.info("Rename the downloaded file %s --> %s", temp_path, final_path)
         os.rename(temp_path, final_path)
