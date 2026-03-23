@@ -3,3 +3,6 @@ venv/
 *.log
 *.tar
 *.bz2
+
+*~
+.DS_Store

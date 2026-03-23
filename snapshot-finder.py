@@ -1,576 +1,901 @@
-import os
-import glob
-import requests
-import time
-import shutil
-import math
-import json
-import sys
-import argparse
-import logging
-import subprocess
-from pathlib import Path
-from requests import ReadTimeout, ConnectTimeout, HTTPError, Timeout, ConnectionError
-from tqdm import tqdm
-from multiprocessing.dummy import Pool as ThreadPool
-import statistics
-import socket
+"""Solana snapshot finder.
 
-parser = argparse.ArgumentParser(description='Solana snapshot finder')
-parser.add_argument('-t', '--threads-count', default=1000, type=int, help='The number of concurrently running threads that check snapshots for rpc nodes')
-parser.add_argument('-r', '--rpc-address', default='https://api.mainnet-beta.solana.com', type=str, help='RPC address of the node from which the current slot number will be taken. Default: https://api.mainnet-beta.solana.com')
-parser.add_argument('--slot', default=0, type=int, help='Search for a snapshot with a specific slot number (useful for network restarts)')
-parser.add_argument('--version', default=None, help='Search for a snapshot from a specific version node')
-parser.add_argument('--wildcard-version', default=None, help='Search for a snapshot with a major / minor version e.g. 1.18 (excluding .23)')
-parser.add_argument('--max-snapshot-age', default=1300, type=int, help='How many slots ago the snapshot was created (in slots)')
-parser.add_argument('--min-download-speed', default=60, type=int, help='Minimum average snapshot download speed in megabytes')
-parser.add_argument('--max-download-speed', type=int, help='Maximum snapshot download speed in megabytes. Example: --max-download-speed 192')
-parser.add_argument('--max-latency', default=100, type=int, help='The maximum value of latency (milliseconds). If latency > max_latency --> skip')
-parser.add_argument('--with-private-rpc', action='store_true', help='Enable adding and checking RPCs with the --private-rpc option. This slow down checking and searching but potentially increases the number of RPCs from which snapshots can be downloaded.')
-parser.add_argument('--measurement-time', default=7, type=int, help='Time in seconds during which the script will measure the download speed')
-parser.add_argument('--snapshot-path', type=str, default='.', help='The location where the snapshot will be downloaded (absolute path). Example: /home/ubuntu/solana/validator-ledger')
-parser.add_argument('--num-of-retries', default=5, type=int, help='The number of retries if a suitable server for downloading the snapshot was not found')
-parser.add_argument('--sleep', default=7, type=int, help='Sleep before next retry (seconds)')
-parser.add_argument('--sort-order', default='latency', type=str, help='Priority way to sort the found servers. latency or slots_diff')
-parser.add_argument('-ipb', '--ip-blacklist', default='', type=str, help='Comma separated list of ip addresse (ip:port) that will be excluded from the scan. Example: -ipb 1.1.1.1:8899,8.8.8.8:8899')
-parser.add_argument('-b', '--blacklist', default='', type=str, help='If the same corrupted archive is constantly downloaded, you can exclude it. Specify either the number of the slot you want to exclude, or the hash of the archive name. You can specify several, separated by commas. Example: -b 135501350,135501360 or --blacklist 135501350,some_hash')
-parser.add_argument('--internal-rpc-nodes', default='', type=str, help='Comma separated list of internal RPC nodes (ip:port) that will be included in the scan. Example: --internal-rpc-nodes solana-nvme.solana.svc.cluster.local.:8899')
-parser.add_argument('-v', '--verbose', help='Increase output verbosity to DEBUG', action='store_true')
-args = parser.parse_args()
+A cleaner, more maintainable rewrite of the original script with the same
+operator-oriented workflow:
+- discover RPC endpoints
+- inspect full/incremental snapshot availability
+- filter by freshness, latency, and version
+- measure download speed on top candidates
+- download the best snapshot archives
+
+This version also supports storing full and incremental snapshots in separate
+paths via --full-snapshot-archive-path and --incremental-snapshot-archive-path,
+with --snapshots as the primary directory flag.
+"""
+
+from __future__ import annotations
+
+import argparse
+import glob
+import ipaddress
+import json
+import logging
+import math
+import os
+import shutil
+import socket
+import statistics
+import subprocess
+import sys
+import time
+from dataclasses import dataclass, field
+from pathlib import Path
+from threading import Lock
+from typing import Iterable, Optional
+from urllib.parse import urlparse
+
+import requests
+from multiprocessing.dummy import Pool as ThreadPool
+from requests import ConnectionError, ConnectTimeout, HTTPError, ReadTimeout, Timeout
+from tqdm import tqdm
 
 DEFAULT_HEADERS = {"Content-Type": "application/json"}
-RPC = args.rpc_address
-SPECIFIC_SLOT = int(args.slot)
-SPECIFIC_VERSION = args.version
-WILDCARD_VERSION = args.wildcard_version
-MAX_SNAPSHOT_AGE_IN_SLOTS = args.max_snapshot_age
-WITH_PRIVATE_RPC = args.with_private_rpc
-THREADS_COUNT = args.threads_count
-MIN_DOWNLOAD_SPEED_MB = args.min_download_speed
-MAX_DOWNLOAD_SPEED_MB = args.max_download_speed
-SPEED_MEASURE_TIME_SEC = args.measurement_time
-MAX_LATENCY = args.max_latency
-SNAPSHOT_PATH = args.snapshot_path if args.snapshot_path[-1] != '/' else args.snapshot_path[:-1]
-NUM_OF_MAX_ATTEMPTS = args.num_of_retries
-SLEEP_BEFORE_RETRY = args.sleep
-NUM_OF_ATTEMPTS = 1
-SORT_ORDER = args.sort_order
-BLACKLIST = str(args.blacklist).split(",")
-IP_BLACKLIST = str(args.ip_blacklist).split(",")
-INTERNAL_RPC_NODES = str(args.internal_rpc_nodes).split(",")
-FULL_LOCAL_SNAP_SLOT = 0
-
-current_slot = 0
-DISCARDED_BY_ARCHIVE_TYPE = 0
-DISCARDED_BY_LATENCY = 0
-DISCARDED_BY_SLOT = 0
-DISCARDED_BY_VERSION = 0
-DISCARDED_BY_UNKNW_ERR = 0
-DISCARDED_BY_TIMEOUT = 0
-FULL_LOCAL_SNAPSHOTS = []
-# skip servers that do not fit the filters so as not to check them again
-unsuitable_servers = set()
-# Configure Logging
-logging.getLogger('urllib3').setLevel(logging.WARNING)
-if args.verbose:
-    logging.basicConfig(
-        level=logging.DEBUG,
-        format="%(asctime)s [%(levelname)s] %(message)s",
-        handlers=[
-            logging.FileHandler(f'{SNAPSHOT_PATH}/snapshot-finder.log'),
-            logging.StreamHandler(sys.stdout),
-        ]
-    )
-
-else:
-    # logging.basicConfig(stream=sys.stdout, encoding='utf-8', level=logging.INFO, format='|%(asctime)s| %(message)s')
-        logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(message)s",
-        handlers=[
-            logging.FileHandler(f'{SNAPSHOT_PATH}/snapshot-finder.log'),
-            logging.StreamHandler(sys.stdout),
-        ]
-    )
-logger = logging.getLogger(__name__)
+DEFAULT_RPC_ADDRESS = "https://api.mainnet-beta.solana.com"
+DEFAULT_SPEED_TEST_LIMIT = 15
 
 
-# Function to resolve domain names to IP addresses
-def resolve_domain(domain):
-    """
-    Resolves domain to IP address using Python's socket module
-    Returns a list of IP addresses for the domain
-    """
-    logger.debug(f"Resolving domain: {domain}")
-    try:
-        # Check if we have a domain (not an IP address)
-        if not domain[0].isdigit():
-            try:
-                # First, try to get all addresses using getaddrinfo
-                # This can return multiple IP addresses for a single domain
-                addrinfo = socket.getaddrinfo(domain, None)
-                # Extract unique IP addresses
-                ips = list(set(info[4][0] for info in addrinfo if info[0] == socket.AF_INET))
-                
-                if ips:
-                    logger.debug(f"Resolved {domain} to {ips}")
-                    return ips
-                else:
-                    # Fallback to basic gethostbyname if no IPv4 addresses found
-                    ip = socket.gethostbyname(domain)
-                    logger.debug(f"Resolved {domain} to {ip} using gethostbyname")
-                    return [ip]
-            except socket.gaierror as e:
-                logger.warning(f"Could not resolve {domain}: {e}")
-                return [domain]  # Return original domain if resolution fails
-        else:
-            # It's already an IP, return as is
-            return [domain]
-    except Exception as e:
-        logger.warning(f"Failed to resolve domain {domain}: {e}")
-        # Return original domain if resolution fails
-        return [domain]
-
-def convert_size(size_bytes):
-   if size_bytes == 0:
-    return "0B"
-   size_name = ("B", "KB", "MB", "GB", "TB", "PB", "EB", "ZB", "YB")
-   i = int(math.floor(math.log(size_bytes, 1024)))
-   p = math.pow(1024, i)
-   s = round(size_bytes / p, 2)
-   return "%s %s" % (s, size_name[i])
+@dataclass(slots=True)
+class Config:
+    threads_count: int
+    rpc_address: str
+    specific_slot: int
+    specific_version: Optional[str]
+    wildcard_version: Optional[str]
+    max_snapshot_age_in_slots: int
+    min_download_speed_mb: int
+    max_download_speed_mb: Optional[int]
+    max_latency_ms: int
+    with_private_rpc: bool
+    measurement_time_sec: int
+    snapshots_path: Path
+    full_snapshot_archive_path: Path
+    incremental_snapshot_archive_path: Path
+    num_of_retries: int
+    sleep_before_retry_sec: int
+    sort_order: str
+    ip_blacklist: set[str]
+    snapshot_blacklist: set[str]
+    internal_rpc_nodes: list[str]
+    verbose: bool
+    speed_test_limit: int = DEFAULT_SPEED_TEST_LIMIT
 
 
-def measure_speed(url: str, measure_time: int) -> float:
-    logging.debug('measure_speed()')
-    url = f'http://{url}/snapshot.tar.bz2'
-    r = requests.get(url, stream=True, timeout=measure_time+2)
-    r.raise_for_status()
-    start_time = time.monotonic_ns()
-    last_time = start_time
-    loaded = 0
-    speeds = []
-    for chunk in r.iter_content(chunk_size=81920):
-        curtime = time.monotonic_ns()
-
-        worktime = (curtime - start_time) / 1000000000
-        if worktime >= measure_time:
-            break
-
-        delta = (curtime - last_time) / 1000000000
-        loaded += len(chunk)
-        if delta > 1:
-            estimated_bytes_per_second = loaded * (1 / delta)
-            # print(f'{len(chunk)}:{delta} : {estimated_bytes_per_second}')
-            speeds.append(estimated_bytes_per_second)
-
-            last_time = curtime
-            loaded = 0
-
-    return statistics.median(speeds)
+@dataclass(slots=True)
+class SnapshotFile:
+    kind: str
+    filename: str
+    snapshot_slot: int
+    base_slot: Optional[int] = None
+    full_slot: Optional[int] = None
+    relative_path: Optional[str] = None
 
 
-def do_request(url_: str, method_: str = 'GET', data_: str = '', timeout_: int = 3,
-               headers_: dict = None):
-    global DISCARDED_BY_UNKNW_ERR
-    global DISCARDED_BY_TIMEOUT
-    r = ''
-    if headers_ is None:
-        headers_ = DEFAULT_HEADERS
-
-    try:
-        if method_.lower() == 'get':
-            r = requests.get(url_, headers=headers_, timeout=(timeout_, timeout_))
-        elif method_.lower() == 'post':
-            r = requests.post(url_, headers=headers_, data=data_, timeout=(timeout_, timeout_))
-        elif method_.lower() == 'head':
-            r = requests.head(url_, headers=headers_, timeout=(timeout_, timeout_))
-        # print(f'{r.content, r.status_code, r.text}')
-        return r
-
-    except (ReadTimeout, ConnectTimeout, HTTPError, Timeout, ConnectionError) as reqErr:
-        # logger.debug(f'error in do_request(): {reqErr=}')
-        DISCARDED_BY_TIMEOUT += 1
-        return f'error in do_request(): {reqErr}'
-
-    except Exception as unknwErr:
-        DISCARDED_BY_UNKNW_ERR += 1
-        # logger.debug(f'error in do_request(): {unknwErr=}')
-        return f'error in do_request(): {reqErr}'
+@dataclass(slots=True)
+class SnapshotCandidate:
+    snapshot_address: str
+    slots_diff: int
+    latency_ms: float
+    files_to_download: list[str]
 
 
-def get_current_slot():
-    logger.debug("get_current_slot()")
-    d = '{"jsonrpc":"2.0","id":1, "method":"getSlot"}'
-    try:
-        r = do_request(url_=RPC, method_='post', data_=d, timeout_=25)
-        if 'result' in str(r.text):
-            return r.json()["result"]
-        else:
-            logger.error(f'Can\'t get current slot')
-            logger.debug(r.status_code)
-            return None
-
-    except (ReadTimeout, ConnectTimeout, HTTPError, Timeout, ConnectionError) as connectErr:
-        logger.debug(f'Can\'t get current slot\n{connectErr}')
-    except Exception as unknwErr:
-        logger.error(f'Can\'t get current slot\n{unknwErr}')
-        return None
+@dataclass(slots=True)
+class AttemptStats:
+    discarded_by_archive_type: int = 0
+    discarded_by_latency: int = 0
+    discarded_by_slot: int = 0
+    discarded_by_version: int = 0
+    discarded_by_unknown_error: int = 0
+    discarded_by_timeout: int = 0
 
 
-def get_all_rpc_ips():
-    global DISCARDED_BY_VERSION
-
-    logger.debug("get_all_rpc_ips()")
-    d = '{"jsonrpc":"2.0", "id":1, "method":"getClusterNodes"}'
-    r = do_request(url_=RPC, method_='post', data_=d, timeout_=25)
-    if 'result' in str(r.text):
-        rpc_ips = []
-        for node in r.json()["result"]:
-            if (WILDCARD_VERSION is not None and node["version"] and WILDCARD_VERSION not in node["version"]) or \
-               (SPECIFIC_VERSION is not None and node["version"] and node["version"] != SPECIFIC_VERSION):
-                DISCARDED_BY_VERSION += 1
-                continue
-            if node["rpc"] is not None:
-                rpc_ips.append(node["rpc"])
-            elif WITH_PRIVATE_RPC is True:
-                gossip_ip = node["gossip"].split(":")[0]
-                rpc_ips.append(f'{gossip_ip}:8899')
-
-        rpc_ips = list(set(rpc_ips))
-        
-        # Add internal RPC nodes if provided
-        if INTERNAL_RPC_NODES is not None:
-            logger.info(f'Processing {len(INTERNAL_RPC_NODES)} internal RPC nodes: {INTERNAL_RPC_NODES}')
-            
-            # Process each internal node to resolve domains to IPs
-            for node in INTERNAL_RPC_NODES:
-                # Check if this is a host:port format
-                if ":" in node:
-                    host, port = node.split(":")
-                    resolved_ips = resolve_domain(host)
-                    # Add each resolved IP with the original port
-                    for ip in resolved_ips:
-                        resolved_node = f"{ip}:{port}"
-                        logger.info(f'Added resolved node: {resolved_node} (from {node})')
-                        rpc_ips.append(resolved_node)
-                else:
-                    # No port specified, use default port 8899
-                    resolved_ips = resolve_domain(node)
-                    for ip in resolved_ips:
-                        resolved_node = f"{ip}:8899"
-                        logger.info(f'Added resolved node with default port: {resolved_node} (from {node})')
-                        rpc_ips.append(resolved_node)
-            
-            rpc_ips = list(set(rpc_ips))  # Remove duplicates
-            
-        logger.debug(f'RPC_IPS LEN before blacklisting {len(rpc_ips)}')
-        # removing blacklisted ip addresses
-        if IP_BLACKLIST is not None:
-            rpc_ips = list(set(rpc_ips) - set(IP_BLACKLIST))
-        logger.debug(f'RPC_IPS LEN after blacklisting {len(rpc_ips)}')
-        return rpc_ips
-
-    else:
-        logger.error(f'Can\'t get RPC ip addresses {r.text}')
-        sys.exit()
+@dataclass(slots=True)
+class ScanState:
+    current_slot: int = 0
+    unsuitable_servers: set[str] = field(default_factory=set)
+    local_full_snapshot_path: Optional[Path] = None
+    local_full_snapshot_slot: Optional[int] = None
+    local_full_snapshot_is_usable: bool = False
+    candidates: list[SnapshotCandidate] = field(default_factory=list)
+    stats: AttemptStats = field(default_factory=AttemptStats)
 
 
-def get_snapshot_slot(rpc_address: str):
-    global FULL_LOCAL_SNAP_SLOT
-    global DISCARDED_BY_ARCHIVE_TYPE
-    global DISCARDED_BY_LATENCY
-    global DISCARDED_BY_SLOT
+class SnapshotFinder:
+    def __init__(self, config: Config) -> None:
+        self.config = config
+        self.logger = logging.getLogger(__name__)
+        self.wget_path = shutil.which("wget")
+        self._append_lock = Lock()
+        self._pbar_lock = Lock()
+        self._pbar: Optional[tqdm] = None
 
-    pbar.update(1)
-    url = f'http://{rpc_address}/snapshot.tar.bz2'
-    inc_url = f'http://{rpc_address}/incremental-snapshot.tar.bz2'
-    # d = '{"jsonrpc":"2.0","id":1,"method":"getHighestSnapshotSlot"}'
-    try:
-        r = do_request(url_=inc_url, method_='head', timeout_=1)
-        if 'location' in str(r.headers) and 'error' not in str(r.text) and r.elapsed.total_seconds() * 1000 > MAX_LATENCY:
-            DISCARDED_BY_LATENCY += 1
-            return None
+        if self.wget_path is None:
+            raise RuntimeError("The wget utility was not found in the system, it is required")
 
-        if 'location' in str(r.headers) and 'error' not in str(r.text):
-            snap_location_ = r.headers["location"]
-            if snap_location_.endswith('tar') is True:
-                DISCARDED_BY_ARCHIVE_TYPE += 1
-                return None
-            incremental_snap_slot = int(snap_location_.split("-")[2])
-            snap_slot_ = int(snap_location_.split("-")[3])
-            slots_diff = current_slot - snap_slot_
+    def run(self) -> int:
+        self._ensure_paths()
 
-            if slots_diff < -100:
-                logger.error(f'Something wrong with this snapshot\\rpc_node - {slots_diff=}. This node will be skipped {rpc_address=}')
-                DISCARDED_BY_SLOT += 1
-                return
+        self.logger.info("Version: 0.4.0")
+        self.logger.info("https://github.com/1dad-io/solana-snapshot-finder")
+        self.logger.info(
+            "Configuration:\n"
+            f"rpc_address={self.config.rpc_address}\n"
+            f"max_snapshot_age_in_slots={self.config.max_snapshot_age_in_slots}\n"
+            f"min_download_speed_mb={self.config.min_download_speed_mb}\n"
+            f"max_download_speed_mb={self.config.max_download_speed_mb}\n"
+            f"snapshots_path={self.config.snapshots_path}\n"
+            f"full_snapshot_archive_path={self.config.full_snapshot_archive_path}\n"
+            f"incremental_snapshot_archive_path={self.config.incremental_snapshot_archive_path}\n"
+            f"threads_count={self.config.threads_count}\n"
+            f"num_of_retries={self.config.num_of_retries}\n"
+            f"with_private_rpc={self.config.with_private_rpc}\n"
+            f"sort_order={self.config.sort_order}"
+        )
 
-            if slots_diff > MAX_SNAPSHOT_AGE_IN_SLOTS:
-                DISCARDED_BY_SLOT += 1
-                return
+        with_private_rpc = self.config.with_private_rpc
 
-            if FULL_LOCAL_SNAP_SLOT == incremental_snap_slot:
-                json_data["rpc_nodes"].append({
-                    "snapshot_address": rpc_address,
-                    "slots_diff": slots_diff,
-                    "latency": r.elapsed.total_seconds() * 1000,
-                    "files_to_download": [snap_location_]
-                })
-                return
+        for attempt in range(1, self.config.num_of_retries + 1):
+            state = ScanState()
+            state.current_slot = self.config.specific_slot or self.get_current_slot()
 
-            r2 = do_request(url_=url, method_='head', timeout_=1)
-            if 'location' in str(r.headers) and 'error' not in str(r.text):
-                json_data["rpc_nodes"].append({
-                    "snapshot_address": rpc_address,
-                    "slots_diff": slots_diff,
-                    "latency": r.elapsed.total_seconds() * 1000,
-                    "files_to_download": [r.headers["location"], r2.headers['location']],
-                })
-                return
+            if self.config.specific_slot:
+                state.current_slot = self.config.specific_slot
 
-        r = do_request(url_=url, method_='head', timeout_=1)
-        if 'location' in str(r.headers) and 'error' not in str(r.text):
-            snap_location_ = r.headers["location"]
-            # filtering uncompressed archives
-            if snap_location_.endswith('tar') is True:
-                DISCARDED_BY_ARCHIVE_TYPE += 1
-                return None
-            full_snap_slot_ = int(snap_location_.split("-")[1])
-            slots_diff_full = current_slot - full_snap_slot_
-            if slots_diff_full <= MAX_SNAPSHOT_AGE_IN_SLOTS and r.elapsed.total_seconds() * 1000 <= MAX_LATENCY:
-                # print(f'{rpc_address=} | {slots_diff=}')
-                json_data["rpc_nodes"].append({
-                    "snapshot_address": rpc_address,
-                    "slots_diff": slots_diff_full,
-                    "latency": r.elapsed.total_seconds() * 1000,
-                    "files_to_download": [snap_location_]
-                })
-                return
-        return None
+            self.logger.info(
+                "Attempt number: %s. Total attempts: %s",
+                attempt,
+                self.config.num_of_retries,
+            )
 
-    except Exception as getSnapErr_:
-        return None
-
-
-def download(url: str):
-    fname = url[url.rfind('/'):].replace("/", "")
-    temp_fname = f'{SNAPSHOT_PATH}/tmp-{fname}'
-    # try:
-    #     resp = requests.get(url, stream=True)
-    #     total = int(resp.headers.get('content-length', 0))
-    #     with open(temp_fname, 'wb') as file, tqdm(
-    #         desc=fname,
-    #         total=total,
-    #         unit='iB',
-    #         unit_scale=True,
-    #         unit_divisor=1024,
-    #     ) as bar:
-    #         for data in resp.iter_content(chunk_size=1024):
-    #             size = file.write(data)
-    #             bar.update(size)
-
-    #     logger.info(f'Rename the downloaded file {temp_fname} --> {fname}')
-    #     os.rename(temp_fname, f'{SNAPSHOT_PATH}/{fname}')
-
-    # except (ReadTimeout, ConnectTimeout, HTTPError, Timeout, ConnectionError) as downlErr:
-    #     logger.error(f'Exception in download() func\n {downlErr}')
-
-    try:
-        # dirty trick with wget
-        if MAX_DOWNLOAD_SPEED_MB is not None:
-            process = subprocess.run([wget_path, '--progress=dot:giga', f'--limit-rate={MAX_DOWNLOAD_SPEED_MB}M',
-                                      '--trust-server-names', url, f'-O{temp_fname}'],
-              stdout=subprocess.PIPE,
-              universal_newlines=True)
-        else:
-            process = subprocess.run([wget_path, '--progress=dot:giga', '--trust-server-names', url, f'-O{temp_fname}'],
-              stdout=subprocess.PIPE,
-              universal_newlines=True)
-
-        logger.info(f'Rename the downloaded file {temp_fname} --> {fname}')
-        os.rename(temp_fname, f'{SNAPSHOT_PATH}/{fname}')
-
-    except Exception as unknwErr:
-        logger.error(f'Exception in download() func. Make sure wget is installed\n{unknwErr}')
-
-
-def main_worker():
-    try:
-        global FULL_LOCAL_SNAP_SLOT
-        rpc_nodes = list(set(get_all_rpc_ips()))
-        global pbar
-        pbar = tqdm(total=len(rpc_nodes))
-        logger.info(f'RPC servers in total: {len(rpc_nodes)} | Current slot number: {current_slot}\n')
-
-        # Search for full local snapshots.
-        # If such a snapshot is found and it is not too old, then the script will try to find and download an incremental snapshot
-        FULL_LOCAL_SNAPSHOTS = glob.glob(f'{SNAPSHOT_PATH}/snapshot-*tar*')
-        if len(FULL_LOCAL_SNAPSHOTS) > 0:
-            FULL_LOCAL_SNAPSHOTS.sort(reverse=True)
-            FULL_LOCAL_SNAP_SLOT = FULL_LOCAL_SNAPSHOTS[0].replace(SNAPSHOT_PATH, "").split("-")[1]
-            logger.info(f'Found full local snapshot {FULL_LOCAL_SNAPSHOTS[0]} | {FULL_LOCAL_SNAP_SLOT=}')
-
-        else:
-            logger.info(f'Can\'t find any full local snapshots in this path {SNAPSHOT_PATH} --> the search will be carried out on full snapshots')
-
-        print(f'Searching information about snapshots on all found RPCs')
-        pool = ThreadPool()
-        pool.map(get_snapshot_slot, rpc_nodes)
-        logger.info(f'Found suitable RPCs: {len(json_data["rpc_nodes"])}')
-        logger.info(f'The following information shows for what reason and how many RPCs were skipped.'
-        f'Timeout most probably mean, that node RPC port does not respond (port is closed)\n'
-        f'{DISCARDED_BY_ARCHIVE_TYPE=} | {DISCARDED_BY_LATENCY=} |'
-        f' {DISCARDED_BY_SLOT=} | {DISCARDED_BY_VERSION=} | {DISCARDED_BY_TIMEOUT=} | {DISCARDED_BY_UNKNW_ERR=}')
-
-        if len(json_data["rpc_nodes"]) == 0:
-            logger.info(f'No snapshot nodes were found matching the given parameters: {args.max_snapshot_age=}')
-            sys.exit()
-
-        # sort list of rpc node by SORT_ORDER (latency)
-        rpc_nodes_sorted = sorted(json_data["rpc_nodes"], key=lambda k: k[SORT_ORDER])
-
-        json_data.update({
-            "last_update_at": time.time(),
-            "last_update_slot": current_slot,
-            "total_rpc_nodes": len(rpc_nodes),
-            "rpc_nodes_with_actual_snapshot": len(json_data["rpc_nodes"]),
-            "rpc_nodes": rpc_nodes_sorted
-        })
-
-        with open(f'{SNAPSHOT_PATH}/snapshot.json', "w") as result_f:
-            json.dump(json_data, result_f, indent=2)
-        logger.info(f'All data is saved to json file - {SNAPSHOT_PATH}/snapshot.json')
-
-        best_snapshot_node = {}
-        num_of_rpc_to_check = 15
-
-        rpc_nodes_inc_sorted = []
-        logger.info("TRYING TO DOWNLOADING FILES")
-        for i, rpc_node in enumerate(json_data["rpc_nodes"], start=1):
-            # filter blacklisted snapshots
-            if BLACKLIST != ['']:
-                if any(i in str(rpc_node["files_to_download"]) for i in BLACKLIST):
-                    logger.info(f'{i}\\{len(json_data["rpc_nodes"])} BLACKLISTED --> {rpc_node}')
+            if state.current_slot is None:
+                if attempt < self.config.num_of_retries:
+                    time.sleep(self.config.sleep_before_retry_sec)
                     continue
+                self.logger.error("Could not determine current slot")
+                return 1
 
-            logger.info(f'{i}\\{len(json_data["rpc_nodes"])} checking the speed {rpc_node}')
-            if rpc_node["snapshot_address"] in unsuitable_servers:
-                logger.info(f'Rpc node already in unsuitable list --> skip {rpc_node["snapshot_address"]}')
-                continue
-
-            down_speed_bytes = measure_speed(url=rpc_node["snapshot_address"], measure_time=SPEED_MEASURE_TIME_SEC)
-            down_speed_mb = convert_size(down_speed_bytes)
-            if down_speed_bytes < MIN_DOWNLOAD_SPEED_MB * 1e6:
-                logger.info(f'Too slow: {rpc_node=} {down_speed_mb=}')
-                unsuitable_servers.add(rpc_node["snapshot_address"])
-                continue
-
-            elif down_speed_bytes >= MIN_DOWNLOAD_SPEED_MB * 1e6:
-                logger.info(f'Suitable snapshot server found: {rpc_node=} {down_speed_mb=}')
-                for path in reversed(rpc_node["files_to_download"]):
-                    # do not download full snapshot if it already exists locally
-                    if str(path).startswith("/snapshot-"):
-                        full_snap_slot__ = path.split("-")[1]
-                        if full_snap_slot__ == FULL_LOCAL_SNAP_SLOT:
-                            continue
-
-
-                    if 'incremental' in path:
-                        r = do_request(f'http://{rpc_node["snapshot_address"]}/incremental-snapshot.tar.bz2', method_='head', timeout_=2)
-                        if 'location' in str(r.headers) and 'error' not in str(r.text):
-                            best_snapshot_node = f'http://{rpc_node["snapshot_address"]}{r.headers["location"]}'
-                        else:
-                            best_snapshot_node = f'http://{rpc_node["snapshot_address"]}{path}'
-
-                    else:
-                        best_snapshot_node = f'http://{rpc_node["snapshot_address"]}{path}'
-                    logger.info(f'Downloading {best_snapshot_node} snapshot to {SNAPSHOT_PATH}')
-                    download(url=best_snapshot_node)
+            self._load_local_full_snapshot(state)
+            result = self._scan_and_download(state, with_private_rpc=with_private_rpc)
+            if result == 0:
+                self.logger.info("Done")
                 return 0
 
-            elif i > num_of_rpc_to_check:
-                logger.info(f'The limit on the number of RPC nodes from'
-                ' which we measure the speed has been reached {num_of_rpc_to_check=}\n')
-                break
+            with_private_rpc = True
+            if attempt < self.config.num_of_retries:
+                self.logger.info("Now trying with flag --with-private-rpc")
+                self.logger.info(
+                    "Sleeping %s seconds before next try",
+                    self.config.sleep_before_retry_sec,
+                )
+                time.sleep(self.config.sleep_before_retry_sec)
 
-            else:
-                logger.info(f'{down_speed_mb=} < {MIN_DOWNLOAD_SPEED_MB=}')
+        self.logger.error("Could not find a suitable snapshot --> exit")
+        return 1
 
-        if best_snapshot_node is {}:
-            logger.error(f'No snapshot nodes were found matching the given parameters:{args.min_download_speed=}'
-                  f'\nTry restarting the script with --with-private-rpc'
-                  f'RETRY #{NUM_OF_ATTEMPTS}\\{NUM_OF_MAX_ATTEMPTS}')
+    def _scan_and_download(self, state: ScanState, *, with_private_rpc: bool) -> int:
+        rpc_nodes = sorted(set(self.get_all_rpc_ips(state, with_private_rpc=with_private_rpc)))
+        self.logger.info(
+            "RPC servers in total: %s | Current slot number: %s",
+            len(rpc_nodes),
+            state.current_slot,
+        )
+
+        if not rpc_nodes:
+            self.logger.error("No RPC nodes available for scanning")
             return 1
 
+        self.logger.info("Searching information about snapshots on all found RPCs")
+        with tqdm(total=len(rpc_nodes)) as progress_bar:
+            self._pbar = progress_bar
+            pool = ThreadPool(self.config.threads_count)
+            try:
+                pool.map(lambda rpc: self.inspect_rpc_node(state, rpc), rpc_nodes)
+            finally:
+                pool.close()
+                pool.join()
+                self._pbar = None
+
+        self.logger.info("Found suitable RPCs: %s", len(state.candidates))
+        self.logger.info(
+            "Discard summary: discarded_by_archive_type=%s | discarded_by_latency=%s | "
+            "discarded_by_slot=%s | discarded_by_version=%s | discarded_by_timeout=%s | "
+            "discarded_by_unknown_error=%s",
+            state.stats.discarded_by_archive_type,
+            state.stats.discarded_by_latency,
+            state.stats.discarded_by_slot,
+            state.stats.discarded_by_version,
+            state.stats.discarded_by_timeout,
+            state.stats.discarded_by_unknown_error,
+        )
+
+        if not state.candidates:
+            self.logger.info(
+                "No snapshot nodes were found matching the given parameters: max_snapshot_age=%s",
+                self.config.max_snapshot_age_in_slots,
+            )
+            return 1
+
+        candidates = sorted(state.candidates, key=lambda item: getattr(item, self.config.sort_order))
+        self._write_snapshot_json(rpc_nodes, candidates, state)
+        return self._select_and_download_candidate(candidates, state)
+
+    def _select_and_download_candidate(self, candidates: list[SnapshotCandidate], state: ScanState) -> int:
+        for index, candidate in enumerate(candidates[: self.config.speed_test_limit], start=1):
+            if self._is_blacklisted(candidate):
+                self.logger.info("%s/%s BLACKLISTED --> %s", index, len(candidates), candidate)
+                continue
+
+            if candidate.snapshot_address in state.unsuitable_servers:
+                self.logger.info(
+                    "RPC node already in unsuitable list --> skip %s",
+                    candidate.snapshot_address,
+                )
+                continue
+
+            self.logger.info("%s/%s checking the speed %s", index, len(candidates), candidate)
+            speed_bytes_per_second = self.measure_speed(
+                url=candidate.snapshot_address,
+                measure_time=self.config.measurement_time_sec,
+            )
+            speed_human = convert_size(speed_bytes_per_second)
+
+            if speed_bytes_per_second < self.config.min_download_speed_mb * 1e6:
+                self.logger.info("Too slow: candidate=%s speed=%s", candidate, speed_human)
+                state.unsuitable_servers.add(candidate.snapshot_address)
+                continue
+
+            self.logger.info("Suitable snapshot server found: candidate=%s speed=%s", candidate, speed_human)
+            self._download_candidate_files(candidate, state)
+            return 0
+
+        self.logger.error(
+            "No snapshot nodes were found matching the given parameters: min_download_speed_mb=%s",
+            self.config.min_download_speed_mb,
+        )
+        return 1
+
+    def _download_candidate_files(self, candidate: SnapshotCandidate, state: ScanState) -> None:
+        for relative_path in candidate.files_to_download:
+            file_info = parse_snapshot_filename(relative_path)
+
+            if (
+                file_info.kind == "full"
+                and state.local_full_snapshot_is_usable
+                and file_info.full_slot == state.local_full_snapshot_slot
+            ):
+                self.logger.info("Skipping download of existing reusable full snapshot %s", relative_path)
+                continue
+
+            download_url = self._build_download_url(candidate.snapshot_address, relative_path)
+            target_dir = self.get_download_dir(file_info)
+            self.logger.info("Downloading %s to %s", download_url, target_dir)
+            self.download(download_url, target_dir)
+
+    def inspect_rpc_node(self, state: ScanState, rpc_address: str) -> None:
+        self._progress_update(1)
+
+        try:
+            incremental_response = self.do_request(
+                url=f"http://{rpc_address}/incremental-snapshot.tar.bz2",
+                method="head",
+                timeout=1,
+                stats=state.stats,
+            )
+            if self._response_exceeds_latency(incremental_response):
+                state.stats.discarded_by_latency += 1
+                return
+
+            if self.is_redirect_response(incremental_response):
+                incremental_path = incremental_response.headers["location"]
+                incremental_file = parse_snapshot_filename(incremental_path)
+                if incremental_path.endswith("tar"):
+                    state.stats.discarded_by_archive_type += 1
+                    return
+
+                slots_diff = state.current_slot - incremental_file.snapshot_slot
+                if not self._is_slot_diff_acceptable(slots_diff, state.stats):
+                    return
+
+                if (
+                    state.local_full_snapshot_is_usable
+                    and state.local_full_snapshot_slot == incremental_file.base_slot
+                ):
+                    self._append_candidate(
+                        state,
+                        SnapshotCandidate(
+                            snapshot_address=rpc_address,
+                            slots_diff=slots_diff,
+                            latency_ms=incremental_response.elapsed.total_seconds() * 1000,
+                            files_to_download=[incremental_path],
+                        ),
+                    )
+                    return
+
+                full_response = self.do_request(
+                    url=f"http://{rpc_address}/snapshot.tar.bz2",
+                    method="head",
+                    timeout=1,
+                    stats=state.stats,
+                )
+                if self.is_redirect_response(full_response):
+                    self._append_candidate(
+                        state,
+                        SnapshotCandidate(
+                            snapshot_address=rpc_address,
+                            slots_diff=slots_diff,
+                            latency_ms=min(
+                                incremental_response.elapsed.total_seconds() * 1000,
+                                full_response.elapsed.total_seconds() * 1000,
+                            ),
+                            files_to_download=[full_response.headers["location"], incremental_path],
+                        ),
+                    )
+                    return
+
+            full_response = self.do_request(
+                url=f"http://{rpc_address}/snapshot.tar.bz2",
+                method="head",
+                timeout=1,
+                stats=state.stats,
+            )
+            if not self.is_redirect_response(full_response):
+                return
+
+            full_path = full_response.headers["location"]
+            if full_path.endswith("tar"):
+                state.stats.discarded_by_archive_type += 1
+                return
+
+            full_file = parse_snapshot_filename(full_path)
+            slots_diff = state.current_slot - full_file.snapshot_slot
+            if not self._is_slot_diff_acceptable(slots_diff, state.stats):
+                return
+
+            latency_ms = full_response.elapsed.total_seconds() * 1000
+            if latency_ms > self.config.max_latency_ms:
+                state.stats.discarded_by_latency += 1
+                return
+
+            self._append_candidate(
+                state,
+                SnapshotCandidate(
+                    snapshot_address=rpc_address,
+                    slots_diff=slots_diff,
+                    latency_ms=latency_ms,
+                    files_to_download=[full_path],
+                ),
+            )
+        except Exception as exc:  # noqa: BLE001
+            state.stats.discarded_by_unknown_error += 1
+            self.logger.debug("Unexpected error while inspecting %s: %s", rpc_address, exc)
+
+    def _append_candidate(self, state: ScanState, candidate: SnapshotCandidate) -> None:
+        with self._append_lock:
+            state.candidates.append(candidate)
+
+    def _progress_update(self, amount: int) -> None:
+        if self._pbar is None:
+            return
+        with self._pbar_lock:
+            self._pbar.update(amount)
+
+    def _write_snapshot_json(
+        self,
+        rpc_nodes: Iterable[str],
+        candidates: list[SnapshotCandidate],
+        state: ScanState,
+    ) -> None:
+        payload = {
+            "last_update_at": time.time(),
+            "last_update_slot": state.current_slot,
+            "total_rpc_nodes": len(list(rpc_nodes)),
+            "rpc_nodes_with_actual_snapshot": len(candidates),
+            "rpc_nodes": [
+                {
+                    "snapshot_address": candidate.snapshot_address,
+                    "slots_diff": candidate.slots_diff,
+                    "latency": candidate.latency_ms,
+                    "files_to_download": candidate.files_to_download,
+                }
+                for candidate in candidates
+            ],
+        }
+        output_path = self.config.snapshots_path / "snapshot.json"
+        output_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        self.logger.info("All data is saved to json file - %s", output_path)
+
+    def _load_local_full_snapshot(self, state: ScanState) -> None:
+        latest = self._find_latest_local_full_snapshot()
+        state.local_full_snapshot_path = None
+        state.local_full_snapshot_slot = None
+        state.local_full_snapshot_is_usable = False
+
+        if latest is None:
+            self.logger.info(
+                "Cannot find any full local snapshots in %s --> the search will be carried out on full snapshots",
+                self.config.full_snapshot_archive_path,
+            )
+            return
+
+        state.local_full_snapshot_path = latest[0]
+        state.local_full_snapshot_slot = latest[1]
+        local_full_age = state.current_slot - latest[1]
+        state.local_full_snapshot_is_usable = 0 <= local_full_age <= self.config.max_snapshot_age_in_slots
+        self.logger.info(
+            "Found full local snapshot %s | local_full_snapshot_slot=%s | local_full_age=%s | reusable=%s",
+            state.local_full_snapshot_path,
+            state.local_full_snapshot_slot,
+            local_full_age,
+            state.local_full_snapshot_is_usable,
+        )
+
+    def _find_latest_local_full_snapshot(self) -> Optional[tuple[Path, int]]:
+        latest: Optional[tuple[Path, int]] = None
+        for path_string in glob.glob(str(self.config.full_snapshot_archive_path / "snapshot-*tar*")):
+            path = Path(path_string)
+            try:
+                file_info = parse_snapshot_filename(path.name)
+            except ValueError:
+                continue
+            if file_info.kind != "full" or file_info.full_slot is None:
+                continue
+            if latest is None or file_info.full_slot > latest[1]:
+                latest = (path, file_info.full_slot)
+        return latest
+
+    def get_all_rpc_ips(self, state: ScanState, *, with_private_rpc: bool) -> list[str]:
+        payload = '{"jsonrpc":"2.0", "id":1, "method":"getClusterNodes"}'
+        response = self.do_request(
+            url=self.config.rpc_address,
+            method="post",
+            data=payload,
+            timeout=25,
+            stats=state.stats,
+        )
+        if not isinstance(response, requests.Response):
+            self.logger.error("Cannot get RPC addresses: %s", response)
+            return []
+
+        try:
+            nodes = response.json()["result"]
+        except Exception as exc:  # noqa: BLE001
+            self.logger.error("Cannot parse cluster node list: %s", exc)
+            return []
+
+        rpc_ips: set[str] = set()
+        for node in nodes:
+            version = node.get("version")
+            if self._version_is_excluded(version):
+                state.stats.discarded_by_version += 1
+                continue
+
+            rpc_endpoint = node.get("rpc")
+            if rpc_endpoint:
+                rpc_ips.add(rpc_endpoint)
+                continue
+
+            if with_private_rpc and node.get("gossip"):
+                gossip_ip = node["gossip"].split(":")[0]
+                rpc_ips.add(f"{gossip_ip}:8899")
+
+        for node in self.config.internal_rpc_nodes:
+            rpc_ips.update(self._resolve_internal_rpc_node(node))
+
+        rpc_ips.difference_update(self.config.ip_blacklist)
+        return sorted(rpc_ips)
+
+    def _version_is_excluded(self, version: Optional[str]) -> bool:
+        if self.config.wildcard_version and version and self.config.wildcard_version not in version:
+            return True
+        if self.config.specific_version and version and version != self.config.specific_version:
+            return True
+        return False
+
+    def _resolve_internal_rpc_node(self, node: str) -> set[str]:
+        if not node:
+            return set()
+        if ":" in node:
+            host, port = node.rsplit(":", 1)
+        else:
+            host, port = node, "8899"
+        return {f"{resolved_ip}:{port}" for resolved_ip in resolve_domain(host, self.logger)}
+
+    def get_current_slot(self) -> Optional[int]:
+        payload = '{"jsonrpc":"2.0","id":1, "method":"getSlot"}'
+        response = self.do_request(
+            url=self.config.rpc_address,
+            method="post",
+            data=payload,
+            timeout=25,
+            stats=AttemptStats(),
+        )
+        if not isinstance(response, requests.Response):
+            self.logger.error("Cannot get current slot: %s", response)
+            return None
+
+        try:
+            body = response.json()
+            return body.get("result")
+        except Exception as exc:  # noqa: BLE001
+            self.logger.error("Cannot parse current slot response: %s", exc)
+            return None
+
+    def measure_speed(self, url: str, measure_time: int) -> float:
+        response = requests.get(
+            f"http://{url}/snapshot.tar.bz2",
+            stream=True,
+            timeout=measure_time + 2,
+        )
+        response.raise_for_status()
+
+        start_time = time.monotonic_ns()
+        last_time = start_time
+        loaded_since_last_sample = 0
+        samples: list[float] = []
+
+        for chunk in response.iter_content(chunk_size=81920):
+            current_time = time.monotonic_ns()
+            elapsed_total = (current_time - start_time) / 1_000_000_000
+            if elapsed_total >= measure_time:
+                break
+
+            loaded_since_last_sample += len(chunk)
+            delta = (current_time - last_time) / 1_000_000_000
+            if delta > 1:
+                samples.append(loaded_since_last_sample / delta)
+                last_time = current_time
+                loaded_since_last_sample = 0
+
+        if loaded_since_last_sample > 0:
+            tail_elapsed = (time.monotonic_ns() - last_time) / 1_000_000_000
+            if tail_elapsed > 0:
+                samples.append(loaded_since_last_sample / tail_elapsed)
+
+        return statistics.median(samples) if samples else 0.0
+
+    def do_request(
+        self,
+        *,
+        url: str,
+        method: str = "get",
+        data: str = "",
+        timeout: int = 3,
+        headers: Optional[dict[str, str]] = None,
+        stats: Optional[AttemptStats] = None,
+    ):
+        request_headers = headers or DEFAULT_HEADERS
+        try:
+            if method.lower() == "get":
+                return requests.get(url, headers=request_headers, timeout=(timeout, timeout))
+            if method.lower() == "post":
+                return requests.post(url, headers=request_headers, data=data, timeout=(timeout, timeout))
+            if method.lower() == "head":
+                return requests.head(url, headers=request_headers, timeout=(timeout, timeout))
+            raise ValueError(f"Unsupported request method: {method}")
+        except (ReadTimeout, ConnectTimeout, HTTPError, Timeout, ConnectionError) as exc:
+            if stats is not None:
+                stats.discarded_by_timeout += 1
+            return f"error in do_request(): {exc}"
+        except Exception as exc:  # noqa: BLE001
+            if stats is not None:
+                stats.discarded_by_unknown_error += 1
+            return f"error in do_request(): {exc}"
+
+    def is_redirect_response(self, response) -> bool:
+        return isinstance(response, requests.Response) and "location" in response.headers
+
+    def _response_exceeds_latency(self, response) -> bool:
+        return self.is_redirect_response(response) and response.elapsed.total_seconds() * 1000 > self.config.max_latency_ms
+
+    def _is_slot_diff_acceptable(self, slots_diff: int, stats: AttemptStats) -> bool:
+        if slots_diff < -100:
+            stats.discarded_by_slot += 1
+            return False
+        if slots_diff > self.config.max_snapshot_age_in_slots:
+            stats.discarded_by_slot += 1
+            return False
+        return True
+
+    def _is_blacklisted(self, candidate: SnapshotCandidate) -> bool:
+        if not self.config.snapshot_blacklist:
+            return False
+        files_repr = " ".join(candidate.files_to_download)
+        return any(item in files_repr for item in self.config.snapshot_blacklist)
+
+    def _build_download_url(self, snapshot_address: str, relative_path: str) -> str:
+        return f"http://{snapshot_address}{relative_path}"
+
+    def get_download_dir(self, file_info: SnapshotFile) -> Path:
+        if file_info.kind == "incremental":
+            return self.config.incremental_snapshot_archive_path
+        return self.config.full_snapshot_archive_path
+
+    def download(self, url: str, target_dir: Path) -> None:
+        filename = os.path.basename(urlparse(url).path)
+        temp_path = target_dir / f"{filename}.part"
+        final_path = target_dir / filename
+
+        command = [self.wget_path, "--progress=dot:giga", "--trust-server-names"]
+        if self.config.max_download_speed_mb is not None:
+            command.append(f"--limit-rate={self.config.max_download_speed_mb}M")
+        command.extend([url, f"-O{temp_path}"])
+
+        result = subprocess.run(command, stdout=subprocess.PIPE, universal_newlines=True)
+        if result.returncode != 0:
+            raise RuntimeError(f"wget exited with non-zero code {result.returncode}")
+
+        self.logger.info("Rename the downloaded file %s --> %s", temp_path, final_path)
+        os.rename(temp_path, final_path)
+
+    def _ensure_paths(self) -> None:
+        for path in {self.config.full_snapshot_archive_path, self.config.incremental_snapshot_archive_path}:
+            path.mkdir(parents=True, exist_ok=True)
+            try:
+                test_file = path / "write_perm_test"
+                test_file.write_text("ok", encoding="utf-8")
+                test_file.unlink()
+            except OSError as exc:
+                raise RuntimeError(f"Check path and permissions: {path}: {exc}") from exc
 
 
+def parse_snapshot_filename(path: str) -> SnapshotFile:
+    filename = os.path.basename(urlparse(path).path)
+    parts = filename.split("-")
+
+    if filename.startswith("snapshot-") and len(parts) >= 3:
+        slot = int(parts[1])
+        return SnapshotFile(
+            kind="full",
+            filename=filename,
+            snapshot_slot=slot,
+            full_slot=slot,
+            relative_path=path,
+        )
+
+    if filename.startswith("incremental-snapshot-") and len(parts) >= 5:
+        base_slot = int(parts[2])
+        snapshot_slot = int(parts[3])
+        return SnapshotFile(
+            kind="incremental",
+            filename=filename,
+            snapshot_slot=snapshot_slot,
+            base_slot=base_slot,
+            relative_path=path,
+        )
+
+    raise ValueError(f"Unsupported snapshot filename format: {filename}")
+
+
+def convert_size(size_bytes: float) -> str:
+    if size_bytes == 0:
+        return "0B"
+    size_names = ("B", "KB", "MB", "GB", "TB", "PB", "EB", "ZB", "YB")
+    index = int(math.floor(math.log(size_bytes, 1024)))
+    power = math.pow(1024, index)
+    size = round(size_bytes / power, 2)
+    return f"{size} {size_names[index]}"
+
+
+def resolve_domain(domain: str, logger: logging.Logger) -> list[str]:
+    try:
+        ipaddress.ip_address(domain)
+        return [domain]
+    except ValueError:
+        pass
+
+    try:
+        addrinfo = socket.getaddrinfo(domain, None)
+        ips = sorted({info[4][0] for info in addrinfo if info[0] == socket.AF_INET})
+        if ips:
+            return ips
+        return [socket.gethostbyname(domain)]
+    except socket.gaierror as exc:
+        logger.warning("Could not resolve %s: %s", domain, exc)
+        return [domain]
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Failed to resolve domain %s: %s", domain, exc)
+        return [domain]
+
+
+def normalize_directory(path: str) -> Path:
+    return Path(path.rstrip("/")).expanduser().resolve()
+
+
+def parse_csv_set(value: str) -> set[str]:
+    return {item.strip() for item in value.split(",") if item.strip()}
+
+
+def parse_csv_list(value: str) -> list[str]:
+    return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Solana snapshot finder")
+    parser.add_argument(
+        "-t",
+        "--threads-count",
+        default=1000,
+        type=int,
+        help="Number of concurrent threads used to inspect RPC nodes",
+    )
+    parser.add_argument(
+        "-r",
+        "--rpc-address",
+        default=DEFAULT_RPC_ADDRESS,
+        type=str,
+        help="RPC address from which the current slot number will be taken",
+    )
+    parser.add_argument("--slot", default=0, type=int, help="Search for a snapshot with a specific slot")
+    parser.add_argument("--version", default=None, help="Search for a snapshot from a specific validator version")
+    parser.add_argument(
+        "--wildcard-version",
+        default=None,
+        help="Search for snapshots matching a major/minor version, for example 2.2",
+    )
+    parser.add_argument(
+        "--max-snapshot-age",
+        default=2500,
+        type=int,
+        help="Maximum age of a candidate snapshot in slots",
+    )
+    parser.add_argument(
+        "--min-download-speed",
+        default=60,
+        type=int,
+        help="Minimum average download speed in megabytes per second",
+    )
+    parser.add_argument(
+        "--max-download-speed",
+        type=int,
+        help="Optional bandwidth limit in megabytes per second for wget",
+    )
+    parser.add_argument(
+        "--max-latency",
+        default=100,
+        type=int,
+        help="Maximum HEAD request latency in milliseconds",
+    )
+    parser.add_argument(
+        "--with-private-rpc",
+        action="store_true",
+        help="Allow scanning derived private RPC endpoints from gossip addresses",
+    )
+    parser.add_argument(
+        "--measurement-time",
+        default=7,
+        type=int,
+        help="Duration in seconds used for download speed measurement",
+    )
+    parser.add_argument(
+        "--snapshots",
+        "--snapshot-path",
+        dest="snapshots",
+        default=".",
+        type=str,
+        help="Primary snapshots directory; kept compatible with --snapshot-path",
+    )
+    parser.add_argument(
+        "--full-snapshot-archive-path",
+        default=None,
+        type=str,
+        help="Directory where full snapshots will be stored; defaults to --snapshots",
+    )
+    parser.add_argument(
+        "--incremental-snapshot-archive-path",
+        default=None,
+        type=str,
+        help="Directory where incremental snapshots will be stored; defaults to --snapshots",
+    )
+    parser.add_argument("--num-of-retries", default=5, type=int, help="Maximum number of attempts")
+    parser.add_argument("--sleep", default=7, type=int, help="Delay in seconds before the next retry")
+    parser.add_argument(
+        "--sort-order",
+        default="latency",
+        choices=["latency_ms", "slots_diff", "latency"],
+        help="Sort priority for discovered candidates",
+    )
+    parser.add_argument(
+        "-ipb",
+        "--ip-blacklist",
+        default="",
+        type=str,
+        help="Comma-separated list of RPC endpoints to exclude",
+    )
+    parser.add_argument(
+        "-b",
+        "--blacklist",
+        default="",
+        type=str,
+        help="Comma-separated list of snapshot slots or hashes to exclude",
+    )
+    parser.add_argument(
+        "--internal-rpc-nodes",
+        default="",
+        type=str,
+        help="Comma-separated list of internal RPC nodes to include",
+    )
+    parser.add_argument("-v", "--verbose", action="store_true", help="Enable debug logging")
+    return parser
+
+
+def build_config(args: argparse.Namespace) -> Config:
+    snapshots_path = normalize_directory(args.snapshots)
+    full_snapshot_archive_path = (
+        normalize_directory(args.full_snapshot_archive_path)
+        if args.full_snapshot_archive_path
+        else snapshots_path
+    )
+    incremental_snapshot_archive_path = (
+        normalize_directory(args.incremental_snapshot_archive_path)
+        if args.incremental_snapshot_archive_path
+        else snapshots_path
+    )
+    sort_order = "latency_ms" if args.sort_order == "latency" else args.sort_order
+
+    return Config(
+        threads_count=args.threads_count,
+        rpc_address=args.rpc_address,
+        specific_slot=int(args.slot),
+        specific_version=args.version,
+        wildcard_version=args.wildcard_version,
+        max_snapshot_age_in_slots=args.max_snapshot_age if not args.slot else 0,
+        min_download_speed_mb=args.min_download_speed,
+        max_download_speed_mb=args.max_download_speed,
+        max_latency_ms=args.max_latency,
+        with_private_rpc=args.with_private_rpc,
+        measurement_time_sec=args.measurement_time,
+        snapshots_path=snapshots_path,
+        full_snapshot_archive_path=full_snapshot_archive_path,
+        incremental_snapshot_archive_path=incremental_snapshot_archive_path,
+        num_of_retries=args.num_of_retries,
+        sleep_before_retry_sec=args.sleep,
+        sort_order=sort_order,
+        ip_blacklist=parse_csv_set(args.ip_blacklist),
+        snapshot_blacklist=parse_csv_set(args.blacklist),
+        internal_rpc_nodes=parse_csv_list(args.internal_rpc_nodes),
+        verbose=args.verbose,
+    )
+
+
+def configure_logging(config: Config) -> None:
+    log_file = config.snapshots_path / "snapshot-finder.log"
+    log_file.parent.mkdir(parents=True, exist_ok=True)
+    logging.getLogger("urllib3").setLevel(logging.WARNING)
+    logging.basicConfig(
+        level=logging.DEBUG if config.verbose else logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(message)s",
+        handlers=[
+            logging.FileHandler(log_file),
+            logging.StreamHandler(sys.stdout),
+        ],
+    )
+
+
+def main() -> int:
+    parser = build_parser()
+    args = parser.parse_args()
+    config = build_config(args)
+    configure_logging(config)
+
+    try:
+        finder = SnapshotFinder(config)
+        return finder.run()
     except KeyboardInterrupt:
-        sys.exit('\nKeyboardInterrupt - ctrl + c')
-
-    except:
+        print("\nKeyboardInterrupt - Ctrl+C", file=sys.stderr)
+        return 130
+    except Exception as exc:  # noqa: BLE001
+        logging.getLogger(__name__).error("Fatal error: %s", exc)
         return 1
 
 
-logger.info("Version: 0.3.9")
-logger.info("https://github.com/1dad-io/solana-snapshot-finder\n\n")
-logger.info(f'{RPC=}\n'
-      f'{MAX_SNAPSHOT_AGE_IN_SLOTS=}\n'
-      f'{MIN_DOWNLOAD_SPEED_MB=}\n'
-      f'{MAX_DOWNLOAD_SPEED_MB=}\n'
-      f'{SNAPSHOT_PATH=}\n'
-      f'{THREADS_COUNT=}\n'
-      f'{NUM_OF_MAX_ATTEMPTS=}\n'
-      f'{WITH_PRIVATE_RPC=}\n'
-      f'{SORT_ORDER=}')
-
-try:
-    f_ = open(f'{SNAPSHOT_PATH}/write_perm_test', 'w')
-    f_.close()
-    os.remove(f'{SNAPSHOT_PATH}/write_perm_test')
-except IOError:
-    logger.error(f'\nCheck {SNAPSHOT_PATH=} and permissions')
-    Path(SNAPSHOT_PATH).mkdir(parents=True, exist_ok=True)
-
-wget_path = shutil.which("wget")
-
-if wget_path is None:
-    logger.error("The wget utility was not found in the system, it is required")
-    sys.exit()
-
-json_data = ({"last_update_at": 0.0,
-              "last_update_slot": 0,
-              "total_rpc_nodes": 0,
-              "rpc_nodes_with_actual_snapshot": 0,
-              "rpc_nodes": []
-              })
-
-
-while NUM_OF_ATTEMPTS <= NUM_OF_MAX_ATTEMPTS:
-    if SPECIFIC_SLOT != 0 and type(SPECIFIC_SLOT) is int:
-        current_slot = SPECIFIC_SLOT
-        MAX_SNAPSHOT_AGE_IN_SLOTS = 0
-    else:
-        current_slot = get_current_slot()
-    logger.info(f'Attempt number: {NUM_OF_ATTEMPTS}. Total attempts: {NUM_OF_MAX_ATTEMPTS}')
-    NUM_OF_ATTEMPTS += 1
-
-    if current_slot is None:
-        continue
-
-    worker_result = main_worker()
-
-    if worker_result == 0:
-        logger.info("Done")
-        exit(0)
-
-    if worker_result != 0:
-        logger.info("Now trying with flag --with-private-rpc")
-        WITH_PRIVATE_RPC = True
-
-    if NUM_OF_ATTEMPTS >= NUM_OF_MAX_ATTEMPTS:
-        logger.error(f'Could not find a suitable snapshot --> exit')
-        sys.exit()
-
-    logger.info(f"Sleeping {SLEEP_BEFORE_RETRY} seconds before next try")
-    time.sleep(SLEEP_BEFORE_RETRY)
+if __name__ == "__main__":
+    raise SystemExit(main())

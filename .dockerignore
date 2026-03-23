@@ -1,0 +1,14 @@
+venv/
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.log
+*.tar
+*.bz2
+*.zst
+*.part
+*~
+.DS_Store
+.git/
+.gitignore
