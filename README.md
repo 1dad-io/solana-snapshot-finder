@@ -13,7 +13,7 @@ It is built for operators who want more control than the validator's built-in sn
 - Real transfer-speed probing before choosing a source
 - Separate full and incremental archive directories
 - Backward compatibility with the legacy `--snapshot-path` flag
-- `snapshot.json` and `snapshot-finder.log` output for debugging and automation
+- `snapshot.json`, `snapshot-finder.log`, and runtime `blacklist.json` output for debugging and automation
 
 ## How it works
 
@@ -49,6 +49,8 @@ The tool prefers the freshest valid source that also satisfies your latency and 
 When a local full snapshot already exists, the tool checks whether it is still fresh enough to reuse. If it is reusable and a remote incremental snapshot is based on that same full snapshot slot, only the incremental snapshot is downloaded. Otherwise, the tool downloads a new full snapshot and, when applicable, the matching incremental snapshot.
 
 Incomplete downloads use the `.part` suffix until the transfer completes successfully.
+
+Failing RPC snapshot sources can also be written to a runtime `blacklist.json` under `--snapshots`. This blacklist helps retries avoid hammering the same broken source, and entries are automatically pruned after the configured TTL.
 
 ## Requirements
 
@@ -107,6 +109,12 @@ Require faster download sources:
 
 ```bash
 python3 snapshot-finder.py   --snapshots snapshots   --min-download-speed 120   --measurement-time 10
+```
+
+Keep failing RPCs in the runtime blacklist for one hour:
+
+```bash
+python3 snapshot-finder.py   --snapshots snapshots   --runtime-blacklist-ttl 3600
 ```
 
 Use a specific RPC to fetch cluster data:
@@ -207,11 +215,12 @@ The provided Dockerfile uses:
 - `--max-download-speed` — upper bound for acceptable measured download speed in MB/s
 - `--measurement-time` — number of seconds used for the download speed probe
 
-### Retry and concurrency options
+### Retry, concurrency, and runtime blacklist options
 
 - `--threads-count` — number of worker threads used for RPC probing
 - `--num-of-retries` — number of attempts before the tool gives up
 - `--sleep` — delay in seconds between retry attempts
+- `--runtime-blacklist-ttl` — keep failing RPC snapshot sources in `blacklist.json` for this many seconds before auto-pruning them; use `0` to disable the persistent runtime blacklist
 
 ### Exclusion and logging options
 
@@ -226,6 +235,7 @@ Use `python3 snapshot-finder.py --help` for the full argument list.
 The tool writes:
 - `snapshot-finder.log` in `--snapshots`
 - `snapshot.json` in `--snapshots`
+- `blacklist.json` in `--snapshots` when runtime blacklisting is enabled
 - full snapshot archives in `--full-snapshot-archive-path`
 - incremental snapshot archives in `--incremental-snapshot-archive-path`
 
@@ -234,6 +244,8 @@ The tool writes:
 - The speed check is a short real download probe, not a theoretical estimate.
 - A local full snapshot is reused only when it is still fresh enough.
 - If a matching incremental snapshot can be applied on top of a reusable local full snapshot, only the incremental archive is downloaded.
+- If an incremental snapshot disappears because the full download took too long, the tool can retry discovery of a fresh compatible incremental.
+- Failing RPC snapshot sources can be persisted in `blacklist.json` and auto-pruned after `--runtime-blacklist-ttl` seconds.
 - If no suitable candidate is found, the tool retries and can expand the search by enabling private RPC probing.
 
 ## Troubleshooting
@@ -245,6 +257,10 @@ Install `wget` and retry.
 ### Existing partial downloads
 
 Incomplete downloads are left with a `.part` suffix. Remove stale `.part` files manually if they were left behind after an interrupted run.
+
+### Runtime blacklist entries
+
+Failing RPC snapshot sources can be stored in `blacklist.json` under `--snapshots`. Entries are pruned automatically after `--runtime-blacklist-ttl` seconds, or immediately if you delete `blacklist.json`.
 
 ## License
 

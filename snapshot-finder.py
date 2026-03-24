@@ -42,6 +42,8 @@ from tqdm import tqdm
 DEFAULT_HEADERS = {"Content-Type": "application/json"}
 DEFAULT_RPC_ADDRESS = "https://api.mainnet-beta.solana.com"
 DEFAULT_SPEED_TEST_LIMIT = 15
+DEFAULT_RUNTIME_BLACKLIST_TTL_SEC = 3600
+DEFAULT_RUNTIME_BLACKLIST_FILENAME = "blacklist.json"
 
 
 class DownloadError(RuntimeError):
@@ -74,6 +76,8 @@ class Config:
     snapshot_blacklist: set[str]
     internal_rpc_nodes: list[str]
     verbose: bool
+    runtime_blacklist_ttl_sec: int = DEFAULT_RUNTIME_BLACKLIST_TTL_SEC
+    runtime_blacklist_filename: str = DEFAULT_RUNTIME_BLACKLIST_FILENAME
     speed_test_limit: int = DEFAULT_SPEED_TEST_LIMIT
 
 
@@ -112,6 +116,7 @@ class ScanState:
     local_full_snapshot_path: Optional[Path] = None
     local_full_snapshot_slot: Optional[int] = None
     local_full_snapshot_is_usable: bool = False
+    runtime_blacklist: set[str] = field(default_factory=set)
     candidates: list[SnapshotCandidate] = field(default_factory=list)
     stats: AttemptStats = field(default_factory=AttemptStats)
 
@@ -123,6 +128,7 @@ class SnapshotFinder:
         self.wget_path = shutil.which("wget")
         self._append_lock = Lock()
         self._pbar_lock = Lock()
+        self._blacklist_lock = Lock()
         self._pbar: Optional[tqdm] = None
 
         if self.wget_path is None:
@@ -145,7 +151,8 @@ class SnapshotFinder:
             f"threads_count={self.config.threads_count}\n"
             f"num_of_retries={self.config.num_of_retries}\n"
             f"with_private_rpc={self.config.with_private_rpc}\n"
-            f"sort_order={self.config.sort_order}"
+            f"sort_order={self.config.sort_order}\n"
+            f"runtime_blacklist_ttl_sec={self.config.runtime_blacklist_ttl_sec}"
         )
 
         with_private_rpc = self.config.with_private_rpc
@@ -170,6 +177,7 @@ class SnapshotFinder:
                 self.logger.error("Could not determine current slot")
                 return 1
 
+            self._load_runtime_blacklist(state)
             self._load_local_full_snapshot(state)
             result = self._scan_and_download(state, with_private_rpc=with_private_rpc)
             if result == 0:
@@ -249,10 +257,20 @@ class SnapshotFinder:
                 continue
 
             self.logger.info("%s/%s checking the speed %s", index, len(candidates), candidate)
-            speed_bytes_per_second = self.measure_speed(
-                url=candidate.snapshot_address,
-                measure_time=self.config.measurement_time_sec,
-            )
+            try:
+                speed_bytes_per_second = self.measure_speed(
+                    url=candidate.snapshot_address,
+                    measure_time=self.config.measurement_time_sec,
+                )
+            except Exception as exc:  # noqa: BLE001
+                self.logger.warning(
+                    "Speed check failed for %s: %s. Adding it to runtime blacklist",
+                    candidate.snapshot_address,
+                    exc,
+                )
+                state.unsuitable_servers.add(candidate.snapshot_address)
+                self._add_to_runtime_blacklist(candidate.snapshot_address, reason="speed_check_failed")
+                continue
             speed_human = convert_size(speed_bytes_per_second)
 
             if speed_bytes_per_second < self.config.min_download_speed_mb * 1e6:
@@ -261,8 +279,18 @@ class SnapshotFinder:
                 continue
 
             self.logger.info("Suitable snapshot server found: candidate=%s speed=%s", candidate, speed_human)
-            self._download_candidate_files(candidate, state)
-            return 0
+            try:
+                self._download_candidate_files(candidate, state)
+                return 0
+            except DownloadError as exc:
+                self.logger.warning(
+                    "Download failed for %s: %s. Adding it to runtime blacklist and trying the next candidate",
+                    candidate.snapshot_address,
+                    exc,
+                )
+                state.unsuitable_servers.add(candidate.snapshot_address)
+                self._add_to_runtime_blacklist(candidate.snapshot_address, reason="download_failed")
+                continue
 
         self.logger.error(
             "No snapshot nodes were found matching the given parameters: min_download_speed_mb=%s",
@@ -458,8 +486,98 @@ class SnapshotFinder:
         return True
 
 
+
+    @property
+    def runtime_blacklist_path(self) -> Path:
+        return self.config.snapshots_path / self.config.runtime_blacklist_filename
+
+    def _read_runtime_blacklist_entries(self) -> dict[str, dict]:
+        if self.config.runtime_blacklist_ttl_sec <= 0:
+            return {}
+
+        path = self.runtime_blacklist_path
+        if not path.exists():
+            return {}
+
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception as exc:  # noqa: BLE001
+            self.logger.warning("Could not read runtime blacklist %s: %s", path, exc)
+            return {}
+
+        if not isinstance(payload, dict):
+            return {}
+
+        entries = payload.get("entries", payload)
+        if not isinstance(entries, dict):
+            return {}
+
+        now = int(time.time())
+        changed = False
+        pruned: dict[str, dict] = {}
+
+        for rpc_address, metadata in entries.items():
+            if not isinstance(metadata, dict):
+                changed = True
+                continue
+
+            added_at = metadata.get("added_at")
+            if not isinstance(added_at, (int, float)):
+                changed = True
+                continue
+
+            if now - int(added_at) >= self.config.runtime_blacklist_ttl_sec:
+                changed = True
+                continue
+
+            pruned[rpc_address] = {
+                "added_at": int(added_at),
+                "reason": str(metadata.get("reason", "runtime_failure")),
+            }
+
+        if changed:
+            self._write_runtime_blacklist_entries(pruned)
+
+        return pruned
+
+    def _write_runtime_blacklist_entries(self, entries: dict[str, dict]) -> None:
+        if self.config.runtime_blacklist_ttl_sec <= 0:
+            return
+
+        payload = {
+            "ttl_seconds": self.config.runtime_blacklist_ttl_sec,
+            "entries": dict(sorted(entries.items())),
+        }
+        self.runtime_blacklist_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+
+    def _load_runtime_blacklist(self, state: ScanState) -> None:
+        entries = self._read_runtime_blacklist_entries()
+        state.runtime_blacklist = set(entries.keys())
+        if state.runtime_blacklist:
+            self.logger.info(
+                "Loaded %s runtime-blacklisted RPC endpoint(s) from %s",
+                len(state.runtime_blacklist),
+                self.runtime_blacklist_path,
+            )
+
+    def _add_to_runtime_blacklist(self, rpc_address: str, *, reason: str) -> None:
+        if self.config.runtime_blacklist_ttl_sec <= 0:
+            return
+
+        with self._blacklist_lock:
+            entries = self._read_runtime_blacklist_entries()
+            entries[rpc_address] = {
+                "added_at": int(time.time()),
+                "reason": reason,
+            }
+            self._write_runtime_blacklist_entries(entries)
+
     def inspect_rpc_node(self, state: ScanState, rpc_address: str) -> None:
         self._progress_update(1)
+
+        if rpc_address in state.runtime_blacklist:
+            self.logger.debug("Skipping runtime-blacklisted RPC %s", rpc_address)
+            return
 
         try:
             incremental_response = self.do_request(
@@ -668,7 +786,9 @@ class SnapshotFinder:
         for node in self.config.internal_rpc_nodes:
             rpc_ips.update(self._resolve_internal_rpc_node(node))
 
+        runtime_blacklist = set(self._read_runtime_blacklist_entries().keys())
         rpc_ips.difference_update(self.config.ip_blacklist)
+        rpc_ips.difference_update(runtime_blacklist)
         return sorted(rpc_ips)
 
     def _version_is_excluded(self, version: Optional[str]) -> bool:
@@ -977,6 +1097,12 @@ def build_parser() -> argparse.ArgumentParser:
         type=str,
         help="Directory where incremental snapshots will be stored; defaults to --snapshots",
     )
+    parser.add_argument(
+        "--runtime-blacklist-ttl",
+        default=DEFAULT_RUNTIME_BLACKLIST_TTL_SEC,
+        type=int,
+        help="Keep failing RPC snapshot sources in blacklist.json for this many seconds; use 0 to disable it",
+    )
     parser.add_argument("--num-of-retries", default=5, type=int, help="Maximum number of attempts")
     parser.add_argument("--sleep", default=7, type=int, help="Delay in seconds before the next retry")
     parser.add_argument(
@@ -1045,6 +1171,8 @@ def build_config(args: argparse.Namespace) -> Config:
         snapshot_blacklist=parse_csv_set(args.blacklist),
         internal_rpc_nodes=parse_csv_list(args.internal_rpc_nodes),
         verbose=args.verbose,
+        runtime_blacklist_ttl_sec=args.runtime_blacklist_ttl,
+        runtime_blacklist_filename=DEFAULT_RUNTIME_BLACKLIST_FILENAME,
     )
 
 
