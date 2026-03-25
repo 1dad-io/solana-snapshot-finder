@@ -78,6 +78,7 @@ class Config:
     verbose: bool
     runtime_blacklist_ttl_sec: int = DEFAULT_RUNTIME_BLACKLIST_TTL_SEC
     runtime_blacklist_filename: str = DEFAULT_RUNTIME_BLACKLIST_FILENAME
+    allow_full_snapshot_fallback: bool = False
     speed_test_limit: int = DEFAULT_SPEED_TEST_LIMIT
 
 
@@ -152,7 +153,8 @@ class SnapshotFinder:
             f"num_of_retries={self.config.num_of_retries}\n"
             f"with_private_rpc={self.config.with_private_rpc}\n"
             f"sort_order={self.config.sort_order}\n"
-            f"runtime_blacklist_ttl_sec={self.config.runtime_blacklist_ttl_sec}"
+            f"runtime_blacklist_ttl_sec={self.config.runtime_blacklist_ttl_sec}\n"
+            f"allow_full_snapshot_fallback={self.config.allow_full_snapshot_fallback}"
         )
 
         with_private_rpc = self.config.with_private_rpc
@@ -196,6 +198,18 @@ class SnapshotFinder:
         self.logger.error("Could not find a suitable snapshot --> exit")
         return 1
 
+    def _scan_rpc_nodes(self, rpc_nodes: list[str], state: ScanState) -> None:
+        self.logger.info("Searching information about snapshots on all found RPCs")
+        with tqdm(total=len(rpc_nodes)) as progress_bar:
+            self._pbar = progress_bar
+            pool = ThreadPool(self.config.threads_count)
+            try:
+                pool.map(lambda rpc: self.inspect_rpc_node(state, rpc), rpc_nodes)
+            finally:
+                pool.close()
+                pool.join()
+                self._pbar = None
+
     def _scan_and_download(self, state: ScanState, *, with_private_rpc: bool) -> int:
         rpc_nodes = sorted(set(self.get_all_rpc_ips(state, with_private_rpc=with_private_rpc)))
         self.logger.info(
@@ -208,16 +222,7 @@ class SnapshotFinder:
             self.logger.error("No RPC nodes available for scanning")
             return 1
 
-        self.logger.info("Searching information about snapshots on all found RPCs")
-        with tqdm(total=len(rpc_nodes)) as progress_bar:
-            self._pbar = progress_bar
-            pool = ThreadPool(self.config.threads_count)
-            try:
-                pool.map(lambda rpc: self.inspect_rpc_node(state, rpc), rpc_nodes)
-            finally:
-                pool.close()
-                pool.join()
-                self._pbar = None
+        self._scan_rpc_nodes(rpc_nodes, state)
 
         self.logger.info("Found suitable RPCs: %s", len(state.candidates))
         self.logger.info(
@@ -232,7 +237,41 @@ class SnapshotFinder:
             state.stats.discarded_by_unknown_error,
         )
 
+        if not state.candidates and state.local_full_snapshot_is_usable and self.config.allow_full_snapshot_fallback:
+            self.logger.info(
+                "No compatible incrementals were found for reusable local full snapshot slot %s. "
+                "Falling back to full snapshot discovery because --allow-full-snapshot-fallback is enabled",
+                state.local_full_snapshot_slot,
+            )
+            fallback_state = ScanState(
+                current_slot=state.current_slot,
+                unsuitable_servers=set(state.unsuitable_servers),
+                runtime_blacklist=set(state.runtime_blacklist),
+            )
+            self._scan_rpc_nodes(rpc_nodes, fallback_state)
+            self.logger.info("Found suitable fallback RPCs: %s", len(fallback_state.candidates))
+            self.logger.info(
+                "Fallback discard summary: discarded_by_archive_type=%s | discarded_by_latency=%s | "
+                "discarded_by_slot=%s | discarded_by_version=%s | discarded_by_timeout=%s | "
+                "discarded_by_unknown_error=%s",
+                fallback_state.stats.discarded_by_archive_type,
+                fallback_state.stats.discarded_by_latency,
+                fallback_state.stats.discarded_by_slot,
+                fallback_state.stats.discarded_by_version,
+                fallback_state.stats.discarded_by_timeout,
+                fallback_state.stats.discarded_by_unknown_error,
+            )
+            if fallback_state.candidates:
+                state = fallback_state
+
         if not state.candidates:
+            if state.local_full_snapshot_is_usable:
+                self.logger.info(
+                    "No compatible incremental snapshots were found for reusable local full snapshot slot %s. "
+                    "Keeping the local full snapshot and exiting without downloading a newer full snapshot",
+                    state.local_full_snapshot_slot,
+                )
+                return 0
             self.logger.info(
                 "No snapshot nodes were found matching the given parameters: max_snapshot_age=%s",
                 self.config.max_snapshot_age_in_slots,
@@ -1104,6 +1143,11 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         help="Keep failing RPC snapshot sources in blacklist.json for this many seconds; use 0 to disable it",
     )
+    parser.add_argument(
+        "--allow-full-snapshot-fallback",
+        action="store_true",
+        help="When no compatible incremental exists for a reusable local full snapshot, fall back to full snapshot discovery",
+    )
     parser.add_argument("--num-of-retries", default=5, type=int, help="Maximum number of attempts")
     parser.add_argument("--sleep", default=7, type=int, help="Delay in seconds before the next retry")
     parser.add_argument(
@@ -1174,6 +1218,7 @@ def build_config(args: argparse.Namespace) -> Config:
         verbose=args.verbose,
         runtime_blacklist_ttl_sec=args.runtime_blacklist_ttl,
         runtime_blacklist_filename=DEFAULT_RUNTIME_BLACKLIST_FILENAME,
+        allow_full_snapshot_fallback=args.allow_full_snapshot_fallback,
     )
 
 

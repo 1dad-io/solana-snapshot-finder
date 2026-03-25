@@ -46,7 +46,7 @@ You can keep a single snapshots directory, or split full and incremental archive
 
 The tool prefers the freshest valid source that also satisfies your latency and download-speed requirements.
 
-When a local full snapshot already exists, the tool checks whether it is still fresh enough to reuse. If it is reusable, the tool treats that full snapshot as the recovery base and searches only for compatible incremental snapshots built on the same full snapshot slot. If no reusable local full snapshot exists, the tool downloads a full snapshot and, when applicable, the matching incremental snapshot.
+When a local full snapshot already exists, the tool checks whether it is still fresh enough to reuse. If it is reusable, the tool treats that full snapshot as the recovery base and searches only for compatible incremental snapshots built on the same full snapshot slot. If no compatible incremental is currently available, the tool keeps the reusable local full snapshot and exits cleanly by default. If `--allow-full-snapshot-fallback` is enabled, it may fall back to full snapshot discovery instead. If no reusable local full snapshot exists, the tool downloads a full snapshot and, when applicable, the matching incremental snapshot.
 
 Incomplete downloads use the `.part` suffix until the transfer completes successfully.
 
@@ -115,6 +115,12 @@ Keep failing RPCs in the runtime blacklist for one hour:
 
 ```bash
 python3 snapshot-finder.py   --snapshots snapshots   --runtime-blacklist-ttl 3600
+```
+
+Allow fallback to full snapshot discovery when no compatible incremental exists for a reusable local full snapshot:
+
+```bash
+python3 snapshot-finder.py   --snapshots snapshots   --allow-full-snapshot-fallback
 ```
 
 Use a specific RPC to fetch cluster data:
@@ -221,6 +227,7 @@ The provided Dockerfile uses:
 - `--num-of-retries` — number of attempts before the tool gives up
 - `--sleep` — delay in seconds between retry attempts
 - `--runtime-blacklist-ttl` — keep failing RPC snapshot sources in `blacklist.json` for this many seconds before auto-pruning them; use `0` to disable the persistent runtime blacklist
+- `--allow-full-snapshot-fallback` — when no compatible incremental exists for a reusable local full snapshot, fall back to full snapshot discovery instead of exiting cleanly with the local full only
 
 ### Exclusion and logging options
 
@@ -244,6 +251,8 @@ The tool writes:
 - The speed check is a short real download probe, not a theoretical estimate.
 - A local full snapshot is reused only when it is still fresh enough.
 - If a reusable local full snapshot exists, the tool switches to incremental-only recovery and searches only for compatible incrementals built on that full snapshot slot.
+- If no compatible incremental is found for a reusable local full snapshot, the default behavior is to keep that local full snapshot and exit cleanly.
+- `--allow-full-snapshot-fallback` makes the tool fall back to full snapshot discovery in that case.
 - If an incremental snapshot disappears because the full download took too long, the tool can retry discovery of a fresh compatible incremental.
 - Failing RPC snapshot sources can be persisted in `blacklist.json` and auto-pruned after `--runtime-blacklist-ttl` seconds.
 - If no suitable candidate is found, the tool retries and can expand the search by enabling private RPC probing.
