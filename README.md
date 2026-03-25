@@ -46,7 +46,7 @@ You can keep a single snapshots directory, or split full and incremental archive
 
 The tool prefers the freshest valid source that also satisfies your latency and download-speed requirements.
 
-When a local full snapshot already exists, the tool checks whether it is still fresh enough to reuse. If it is reusable and a remote incremental snapshot is based on that same full snapshot slot, only the incremental snapshot is downloaded. Otherwise, the tool downloads a new full snapshot and, when applicable, the matching incremental snapshot.
+When a local full snapshot already exists, the tool checks whether it is still fresh enough to reuse. If it is reusable, the tool treats that full snapshot as the recovery base and searches only for compatible incremental snapshots built on the same full snapshot slot. If no reusable local full snapshot exists, the tool downloads a full snapshot and, when applicable, the matching incremental snapshot.
 
 Incomplete downloads use the `.part` suffix until the transfer completes successfully.
 
@@ -243,7 +243,7 @@ The tool writes:
 
 - The speed check is a short real download probe, not a theoretical estimate.
 - A local full snapshot is reused only when it is still fresh enough.
-- If a matching incremental snapshot can be applied on top of a reusable local full snapshot, only the incremental archive is downloaded.
+- If a reusable local full snapshot exists, the tool switches to incremental-only recovery and searches only for compatible incrementals built on that full snapshot slot.
 - If an incremental snapshot disappears because the full download took too long, the tool can retry discovery of a fresh compatible incremental.
 - Failing RPC snapshot sources can be persisted in `blacklist.json` and auto-pruned after `--runtime-blacklist-ttl` seconds.
 - If no suitable candidate is found, the tool retries and can expand the search by enabling private RPC probing.

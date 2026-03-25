@@ -601,19 +601,17 @@ class SnapshotFinder:
                 if not self._is_slot_diff_acceptable(slots_diff, state.stats):
                     return
 
-                if (
-                    state.local_full_snapshot_is_usable
-                    and state.local_full_snapshot_slot == incremental_file.base_slot
-                ):
-                    self._append_candidate(
-                        state,
-                        SnapshotCandidate(
-                            snapshot_address=rpc_address,
-                            slots_diff=slots_diff,
-                            latency_ms=incremental_response.elapsed.total_seconds() * 1000,
-                            files_to_download=[incremental_path],
-                        ),
-                    )
+                if state.local_full_snapshot_is_usable:
+                    if state.local_full_snapshot_slot == incremental_file.base_slot:
+                        self._append_candidate(
+                            state,
+                            SnapshotCandidate(
+                                snapshot_address=rpc_address,
+                                slots_diff=slots_diff,
+                                latency_ms=incremental_response.elapsed.total_seconds() * 1000,
+                                files_to_download=[incremental_path],
+                            ),
+                        )
                     return
 
                 full_response = self.do_request(
@@ -636,6 +634,9 @@ class SnapshotFinder:
                         ),
                     )
                     return
+
+            if state.local_full_snapshot_is_usable:
+                return
 
             full_response = self.do_request(
                 url=f"http://{rpc_address}/snapshot.tar.bz2",
