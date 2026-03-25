@@ -60,7 +60,7 @@ class Config:
     specific_slot: int
     specific_version: Optional[str]
     wildcard_version: Optional[str]
-    max_snapshot_age_in_slots: int
+    maximum_local_snapshot_age: int
     min_download_speed_mb: int
     max_download_speed_mb: Optional[int]
     max_latency_ms: int
@@ -143,7 +143,7 @@ class SnapshotFinder:
         self.logger.info(
             "Configuration:\n"
             f"rpc_address={self.config.rpc_address}\n"
-            f"max_snapshot_age_in_slots={self.config.max_snapshot_age_in_slots}\n"
+            f"maximum_local_snapshot_age={self.config.maximum_local_snapshot_age}\n"
             f"min_download_speed_mb={self.config.min_download_speed_mb}\n"
             f"max_download_speed_mb={self.config.max_download_speed_mb}\n"
             f"snapshots_path={self.config.snapshots_path}\n"
@@ -273,8 +273,8 @@ class SnapshotFinder:
                 )
                 return 0
             self.logger.info(
-                "No snapshot nodes were found matching the given parameters: max_snapshot_age=%s",
-                self.config.max_snapshot_age_in_slots,
+                "No snapshot nodes were found matching the given parameters: maximum_local_snapshot_age=%s",
+                self.config.maximum_local_snapshot_age,
             )
             return 1
 
@@ -765,7 +765,7 @@ class SnapshotFinder:
         state.local_full_snapshot_path = latest[0]
         state.local_full_snapshot_slot = latest[1]
         local_full_age = state.current_slot - latest[1]
-        state.local_full_snapshot_is_usable = 0 <= local_full_age <= self.config.max_snapshot_age_in_slots
+        state.local_full_snapshot_is_usable = 0 <= local_full_age <= self.config.maximum_local_snapshot_age
         self.logger.info(
             "Found full local snapshot %s | local_full_snapshot_slot=%s | local_full_age=%s | reusable=%s",
             state.local_full_snapshot_path,
@@ -938,7 +938,7 @@ class SnapshotFinder:
         if slots_diff < -100:
             stats.discarded_by_slot += 1
             return False
-        if slots_diff > self.config.max_snapshot_age_in_slots:
+        if slots_diff > self.config.maximum_local_snapshot_age:
             stats.discarded_by_slot += 1
             return False
         return True
@@ -1084,10 +1084,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Search for snapshots matching a major/minor version, for example 2.2",
     )
     parser.add_argument(
+        "--maximum-local-snapshot-age",
         "--max-snapshot-age",
+        dest="maximum_local_snapshot_age",
         default=2500,
         type=int,
-        help="Maximum age of a candidate snapshot in slots",
+        help="Reuse a local full snapshot if it is within this many slots of the current cluster slot; --max-snapshot-age is kept as a legacy alias",
     )
     parser.add_argument(
         "--min-download-speed",
@@ -1200,7 +1202,7 @@ def build_config(args: argparse.Namespace) -> Config:
         specific_slot=int(args.slot),
         specific_version=args.version,
         wildcard_version=args.wildcard_version,
-        max_snapshot_age_in_slots=args.max_snapshot_age if not args.slot else 0,
+        maximum_local_snapshot_age=args.maximum_local_snapshot_age if not args.slot else 0,
         min_download_speed_mb=args.min_download_speed,
         max_download_speed_mb=args.max_download_speed,
         max_latency_ms=args.max_latency,

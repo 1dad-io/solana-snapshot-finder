@@ -52,6 +52,8 @@ Incomplete downloads use the `.part` suffix until the transfer completes success
 
 Failing RPC snapshot sources can also be written to a runtime `blacklist.json` under `--snapshots`. This blacklist helps retries avoid hammering the same broken source, and entries are automatically pruned after the configured TTL.
 
+`--maximum-local-snapshot-age` is the primary validator-aligned flag for deciding whether a local full snapshot is still reusable. `--max-snapshot-age` is kept as a legacy compatibility alias.
+
 ## Requirements
 
 - Python 3.10+
@@ -102,7 +104,7 @@ python3 snapshot-finder.py   --snapshot-path snapshots
 Prefer newer snapshots and stricter latency:
 
 ```bash
-python3 snapshot-finder.py   --snapshots snapshots   --max-snapshot-age 800   --max-latency 60
+python3 snapshot-finder.py   --snapshots snapshots   --maximum-local-snapshot-age 800   --max-latency 60
 ```
 
 Require faster download sources:
@@ -209,7 +211,8 @@ The provided Dockerfile uses:
 ### Snapshot selection options
 
 - `--slot` — target a specific full snapshot slot
-- `--max-snapshot-age` — maximum allowed age, in slots, between the current cluster slot and a candidate full snapshot
+- `--maximum-local-snapshot-age` — primary flag for deciding whether a local full snapshot is still reusable
+- `--max-snapshot-age` — legacy alias for `--maximum-local-snapshot-age`
 - `--version` — require an exact validator version match
 - `--wildcard-version` — match a validator major/minor series such as `2.2`
 - `--sort-order` — candidate sort mode: `latency`, `latency_ms`, or `slots_diff`
