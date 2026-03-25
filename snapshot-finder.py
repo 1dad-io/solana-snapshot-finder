@@ -354,6 +354,8 @@ class SnapshotFinder:
         if not candidates:
             return None
 
+        compatible_incrementals: list[tuple[int, float, str, Path]] = []
+
         for candidate in candidates:
             for relative_path in candidate.files_to_download:
                 try:
@@ -369,9 +371,22 @@ class SnapshotFinder:
                     continue
                 if not self._snapshot_file_still_available(download_url):
                     continue
-                return download_url, self.get_download_dir(file_info)
 
-        return None
+                compatible_incrementals.append(
+                    (
+                        file_info.snapshot_slot,
+                        candidate.latency_ms,
+                        download_url,
+                        self.get_download_dir(file_info),
+                    )
+                )
+
+        if not compatible_incrementals:
+            return None
+
+        compatible_incrementals.sort(key=lambda item: (-item[0], item[1]))
+        _, _, best_url, best_target_dir = compatible_incrementals[0]
+        return best_url, best_target_dir
 
     def _rescan_candidates(self, state: ScanState) -> list[SnapshotCandidate]:
         rpc_nodes = sorted(set(self.get_all_rpc_ips(state, with_private_rpc=True)))

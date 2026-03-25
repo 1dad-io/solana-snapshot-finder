@@ -251,12 +251,13 @@ The tool writes:
 
 ## Notes
 
+- Make sure the validator uses a compatible `--maximum-local-snapshot-age` threshold, otherwise validator may still decide to fetch a newer incremental snapshot after the tool finishes.
 - The speed check is a short real download probe, not a theoretical estimate.
 - A local full snapshot is reused only when it is still fresh enough.
 - If a reusable local full snapshot exists, the tool switches to incremental-only recovery and searches only for compatible incrementals built on that full snapshot slot.
 - If no compatible incremental is found for a reusable local full snapshot, the default behavior is to keep that local full snapshot and exit cleanly.
 - `--allow-full-snapshot-fallback` makes the tool fall back to full snapshot discovery in that case.
-- If an incremental snapshot disappears because the full download took too long, the tool can retry discovery of a fresh compatible incremental.
+- If an incremental snapshot disappears because the full download took too long, the tool can retry discovery of a fresh compatible incremental and prefer the newest compatible incremental slot instead of taking the first matching source.
 - After a full snapshot is downloaded successfully, the tool proactively searches for a compatible recent incremental snapshot instead of leaving that work to validator.
 - Failing RPC snapshot sources can be persisted in `blacklist.json` and auto-pruned after `--runtime-blacklist-ttl` seconds.
 - If no suitable candidate is found, the tool retries and can expand the search by enabling private RPC probing.
