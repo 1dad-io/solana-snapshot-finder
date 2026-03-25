@@ -425,6 +425,10 @@ class SnapshotFinder:
         full_downloaded_in_this_run = False
         active_full_slot = state.local_full_snapshot_slot if state.local_full_snapshot_is_usable else None
         tried_incremental_urls: set[str] = set()
+        has_incremental_in_candidate = any(
+            parse_snapshot_filename(path).kind == "incremental"
+            for path in candidate.files_to_download
+        )
 
         for relative_path in candidate.files_to_download:
             file_info = parse_snapshot_filename(relative_path)
@@ -515,6 +519,29 @@ class SnapshotFinder:
             if file_info.kind == "full":
                 full_downloaded_in_this_run = True
                 active_full_slot = file_info.full_slot
+
+                if not has_incremental_in_candidate and active_full_slot is not None:
+                    self.logger.info(
+                        "Full snapshot slot %s downloaded successfully; searching for a matching incremental snapshot",
+                        active_full_slot,
+                    )
+                    try:
+                        if self._download_replacement_incremental(
+                            full_slot=active_full_slot,
+                            state=state,
+                            tried_urls=tried_incremental_urls,
+                        ):
+                            continue
+                    except DownloadError as replacement_exc:
+                        self.logger.warning(
+                            "Matching incremental snapshot download failed after full download: %s (%s)",
+                            replacement_exc.url,
+                            replacement_exc,
+                        )
+                    self.logger.info(
+                        "No compatible incremental snapshot was found after downloading full snapshot slot %s",
+                        active_full_slot,
+                    )
 
     def _snapshot_file_still_available(self, download_url: str) -> bool:
         response = self.do_request(url=download_url, method="head", timeout=3, stats=None)

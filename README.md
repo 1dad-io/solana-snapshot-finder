@@ -46,7 +46,7 @@ You can keep a single snapshots directory, or split full and incremental archive
 
 The tool prefers the freshest valid source that also satisfies your latency and download-speed requirements.
 
-When a local full snapshot already exists, the tool checks whether it is still fresh enough to reuse. If it is reusable, the tool treats that full snapshot as the recovery base and searches only for compatible incremental snapshots built on the same full snapshot slot. If no compatible incremental is currently available, the tool keeps the reusable local full snapshot and exits cleanly by default. If `--allow-full-snapshot-fallback` is enabled, it may fall back to full snapshot discovery instead. If no reusable local full snapshot exists, the tool downloads a full snapshot and, when applicable, the matching incremental snapshot.
+When a local full snapshot already exists, the tool checks whether it is still fresh enough to reuse. If it is reusable, the tool treats that full snapshot as the recovery base and searches only for compatible incremental snapshots built on the same full snapshot slot. If no compatible incremental is currently available, the tool keeps the reusable local full snapshot and exits cleanly by default. If `--allow-full-snapshot-fallback` is enabled, it may fall back to full snapshot discovery instead. If no reusable local full snapshot exists, the tool downloads a full snapshot and then proactively searches for a matching recent incremental snapshot, even if the originally selected candidate did not include one.
 
 Incomplete downloads use the `.part` suffix until the transfer completes successfully.
 
@@ -257,6 +257,7 @@ The tool writes:
 - If no compatible incremental is found for a reusable local full snapshot, the default behavior is to keep that local full snapshot and exit cleanly.
 - `--allow-full-snapshot-fallback` makes the tool fall back to full snapshot discovery in that case.
 - If an incremental snapshot disappears because the full download took too long, the tool can retry discovery of a fresh compatible incremental.
+- After a full snapshot is downloaded successfully, the tool proactively searches for a compatible recent incremental snapshot instead of leaving that work to validator.
 - Failing RPC snapshot sources can be persisted in `blacklist.json` and auto-pruned after `--runtime-blacklist-ttl` seconds.
 - If no suitable candidate is found, the tool retries and can expand the search by enabling private RPC probing.
 
