@@ -78,8 +78,7 @@ class Config:
     get_rpc_peers_timeout_sec: int
     rpc_probe_timeout_sec: int
     sort_order: str
-    ip_blacklist: set[str]
-    snapshot_blacklist: set[str]
+    blacklist: set[str]
     internal_rpc_nodes: list[str]
     verbose: bool
     runtime_blacklist_ttl_sec: int = DEFAULT_RUNTIME_BLACKLIST_TTL_SEC
@@ -886,7 +885,8 @@ class SnapshotFinder:
             rpc_ips.update(self._resolve_internal_rpc_node(node))
 
         runtime_blacklist = set(self._read_runtime_blacklist_entries().keys())
-        rpc_ips.difference_update(self.config.ip_blacklist)
+        endpoint_blacklist = {item for item in self.config.blacklist if ':' in item and '/' not in item}
+        rpc_ips.difference_update(endpoint_blacklist)
         rpc_ips.difference_update(runtime_blacklist)
         return sorted(rpc_ips)
 
@@ -1003,10 +1003,14 @@ class SnapshotFinder:
         return True
 
     def _is_blacklisted(self, candidate: SnapshotCandidate) -> bool:
-        if not self.config.snapshot_blacklist:
+        if not self.config.blacklist:
             return False
+
+        if candidate.snapshot_address in self.config.blacklist:
+            return True
+
         files_repr = " ".join(candidate.files_to_download)
-        return any(item in files_repr for item in self.config.snapshot_blacklist)
+        return any(item in files_repr for item in self.config.blacklist if item != candidate.snapshot_address)
 
     def _build_download_url(self, snapshot_address: str, relative_path: str) -> str:
         return f"http://{snapshot_address}{relative_path}"
@@ -1234,18 +1238,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Sort priority for discovered candidates",
     )
     parser.add_argument(
-        "-ipb",
-        "--ip-blacklist",
-        default="",
-        type=str,
-        help="Comma-separated list of RPC endpoints to exclude",
-    )
-    parser.add_argument(
         "-b",
         "--blacklist",
         default="",
         type=str,
-        help="Comma-separated list of snapshot slots or hashes to exclude",
+        help="Comma-separated list of items to exclude, including RPC endpoints (ip:port), snapshot slots, or archive hashes",
     )
     parser.add_argument(
         "--internal-rpc-nodes",
@@ -1290,8 +1287,7 @@ def build_config(args: argparse.Namespace) -> Config:
         get_rpc_peers_timeout_sec=args.get_rpc_peers_timeout,
         rpc_probe_timeout_sec=args.rpc_probe_timeout,
         sort_order=sort_order,
-        ip_blacklist=parse_csv_set(args.ip_blacklist),
-        snapshot_blacklist=parse_csv_set(args.blacklist),
+        blacklist=parse_csv_set(args.blacklist),
         internal_rpc_nodes=parse_csv_list(args.internal_rpc_nodes),
         verbose=args.verbose,
         runtime_blacklist_ttl_sec=args.runtime_blacklist_ttl,

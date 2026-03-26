@@ -155,10 +155,10 @@ Search for a specific slot:
 python3 snapshot-finder.py   --snapshots snapshots   --slot 381234567
 ```
 
-Exclude problematic endpoints or archives:
+Exclude problematic endpoints or archives with a single blacklist flag:
 
 ```bash
-python3 snapshot-finder.py   --snapshots snapshots   --ip-blacklist 203.0.113.10:8899,198.51.100.5:8899   --blacklist 381234567,some_archive_hash
+python3 snapshot-finder.py   --snapshots snapshots   --blacklist 203.0.113.10:8899,198.51.100.5:8899,381234567,some_archive_hash
 ```
 
 Dedicated mount-point layout:
@@ -236,8 +236,7 @@ The provided Dockerfile uses:
 
 ### Exclusion and logging options
 
-- `--ip-blacklist` — comma-separated list of `ip:port` RPC endpoints to ignore
-- `--blacklist` — comma-separated list of snapshot slots, hashes, or identifiers to ignore
+- `--blacklist` — comma-separated list of items to ignore, including RPC endpoints (`ip:port`), snapshot slots, hashes, or other archive identifiers
 - `--verbose` — enable more detailed console logging
 
 Use `python3 snapshot-finder.py --help` for the full argument list.
