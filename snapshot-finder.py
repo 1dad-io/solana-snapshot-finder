@@ -42,8 +42,14 @@ from tqdm import tqdm
 DEFAULT_HEADERS = {"Content-Type": "application/json"}
 DEFAULT_RPC_ADDRESS = "https://api.mainnet-beta.solana.com"
 DEFAULT_SPEED_TEST_LIMIT = 15
-DEFAULT_RUNTIME_BLACKLIST_TTL_SEC = 3600
+DEFAULT_RUNTIME_BLACKLIST_TTL_SEC = 60
 DEFAULT_RUNTIME_BLACKLIST_FILENAME = "blacklist.json"
+DEFAULT_THREADS_COUNT = 32
+DEFAULT_MEASUREMENT_TIME_SEC = 5
+DEFAULT_NEWER_SNAPSHOT_TIMEOUT_SEC = 180
+DEFAULT_GET_RPC_PEERS_TIMEOUT_SEC = 300
+DEFAULT_BLACKLIST_CLEAR_THRESHOLD_SEC = 60
+DEFAULT_RPC_PROBE_TIMEOUT_SEC = 2
 
 
 class DownloadError(RuntimeError):
@@ -69,8 +75,10 @@ class Config:
     snapshots_path: Path
     full_snapshot_archive_path: Path
     incremental_snapshot_archive_path: Path
-    num_of_retries: int
-    sleep_before_retry_sec: int
+    newer_snapshot_timeout_sec: int
+    get_rpc_peers_timeout_sec: int
+    blacklist_clear_threshold_sec: int
+    rpc_probe_timeout_sec: int
     sort_order: str
     ip_blacklist: set[str]
     snapshot_blacklist: set[str]
@@ -150,34 +158,45 @@ class SnapshotFinder:
             f"full_snapshot_archive_path={self.config.full_snapshot_archive_path}\n"
             f"incremental_snapshot_archive_path={self.config.incremental_snapshot_archive_path}\n"
             f"threads_count={self.config.threads_count}\n"
-            f"num_of_retries={self.config.num_of_retries}\n"
             f"with_private_rpc={self.config.with_private_rpc}\n"
             f"sort_order={self.config.sort_order}\n"
+            f"measurement_time_sec={self.config.measurement_time_sec}\n"
             f"runtime_blacklist_ttl_sec={self.config.runtime_blacklist_ttl_sec}\n"
+            f"newer_snapshot_timeout_sec={self.config.newer_snapshot_timeout_sec}\n"
+            f"get_rpc_peers_timeout_sec={self.config.get_rpc_peers_timeout_sec}\n"
+            f"blacklist_clear_threshold_sec={self.config.blacklist_clear_threshold_sec}\n"
+            f"rpc_probe_timeout_sec={self.config.rpc_probe_timeout_sec}\n"
             f"allow_full_snapshot_fallback={self.config.allow_full_snapshot_fallback}"
         )
 
         with_private_rpc = self.config.with_private_rpc
+        search_started_at = time.monotonic()
+        newer_snapshot_deadline = search_started_at + self.config.newer_snapshot_timeout_sec
+        next_blacklist_clear_at = search_started_at + self.config.blacklist_clear_threshold_sec
+        iteration = 1
 
-        for attempt in range(1, self.config.num_of_retries + 1):
+        while time.monotonic() < newer_snapshot_deadline:
+            remaining_budget = max(0, int(newer_snapshot_deadline - time.monotonic()))
+            self.logger.info(
+                "Search iteration: %s. Remaining newer snapshot budget: %ss",
+                iteration,
+                remaining_budget,
+            )
+
             state = ScanState()
             state.current_slot = self.config.specific_slot or self.get_current_slot()
 
             if self.config.specific_slot:
                 state.current_slot = self.config.specific_slot
 
-            self.logger.info(
-                "Attempt number: %s. Total attempts: %s",
-                attempt,
-                self.config.num_of_retries,
-            )
-
             if state.current_slot is None:
-                if attempt < self.config.num_of_retries:
-                    time.sleep(self.config.sleep_before_retry_sec)
-                    continue
-                self.logger.error("Could not determine current slot")
-                return 1
+                self.logger.warning("Could not determine current slot during this search iteration")
+                iteration += 1
+                continue
+
+            if time.monotonic() >= next_blacklist_clear_at:
+                self._clear_runtime_blacklist()
+                next_blacklist_clear_at += self.config.blacklist_clear_threshold_sec
 
             self._load_runtime_blacklist(state)
             self._load_local_full_snapshot(state)
@@ -187,15 +206,12 @@ class SnapshotFinder:
                 return 0
 
             with_private_rpc = True
-            if attempt < self.config.num_of_retries:
-                self.logger.info("Now trying with flag --with-private-rpc")
-                self.logger.info(
-                    "Sleeping %s seconds before next try",
-                    self.config.sleep_before_retry_sec,
-                )
-                time.sleep(self.config.sleep_before_retry_sec)
+            iteration += 1
 
-        self.logger.error("Could not find a suitable snapshot --> exit")
+        self.logger.error(
+            "Could not find a suitable snapshot within the newer snapshot search budget of %ss --> exit",
+            self.config.newer_snapshot_timeout_sec,
+        )
         return 1
 
     def _scan_rpc_nodes(self, rpc_nodes: list[str], state: ScanState) -> None:
@@ -551,7 +567,7 @@ class SnapshotFinder:
                     )
 
     def _snapshot_file_still_available(self, download_url: str) -> bool:
-        response = self.do_request(url=download_url, method="head", timeout=3, stats=None)
+        response = self.do_request(url=download_url, method="head", timeout=self.config.rpc_probe_timeout_sec, stats=None)
         if not isinstance(response, requests.Response):
             return False
         if response.status_code >= 400:
@@ -645,6 +661,18 @@ class SnapshotFinder:
             }
             self._write_runtime_blacklist_entries(entries)
 
+
+    def _clear_runtime_blacklist(self) -> None:
+        if self.config.runtime_blacklist_ttl_sec <= 0:
+            return
+        if not self.runtime_blacklist_path.exists():
+            return
+        self.logger.info(
+            "Clearing runtime blacklist after %ss to mirror bootstrap-style peer recovery",
+            self.config.blacklist_clear_threshold_sec,
+        )
+        self._write_runtime_blacklist_entries({})
+
     def inspect_rpc_node(self, state: ScanState, rpc_address: str) -> None:
         self._progress_update(1)
 
@@ -656,7 +684,7 @@ class SnapshotFinder:
             incremental_response = self.do_request(
                 url=f"http://{rpc_address}/incremental-snapshot.tar.bz2",
                 method="head",
-                timeout=1,
+                timeout=self.config.rpc_probe_timeout_sec,
                 stats=state.stats,
             )
             if self._response_exceeds_latency(incremental_response):
@@ -690,7 +718,7 @@ class SnapshotFinder:
                 full_response = self.do_request(
                     url=f"http://{rpc_address}/snapshot.tar.bz2",
                     method="head",
-                    timeout=1,
+                    timeout=self.config.rpc_probe_timeout_sec,
                     stats=state.stats,
                 )
                 if self.is_redirect_response(full_response):
@@ -714,7 +742,7 @@ class SnapshotFinder:
             full_response = self.do_request(
                 url=f"http://{rpc_address}/snapshot.tar.bz2",
                 method="head",
-                timeout=1,
+                timeout=self.config.rpc_probe_timeout_sec,
                 stats=state.stats,
             )
             if not self.is_redirect_response(full_response):
@@ -828,7 +856,7 @@ class SnapshotFinder:
             url=self.config.rpc_address,
             method="post",
             data=payload,
-            timeout=25,
+            timeout=self.config.get_rpc_peers_timeout_sec,
             stats=state.stats,
         )
         if not isinstance(response, requests.Response):
@@ -887,7 +915,7 @@ class SnapshotFinder:
             url=self.config.rpc_address,
             method="post",
             data=payload,
-            timeout=25,
+            timeout=self.config.rpc_probe_timeout_sec,
             stats=AttemptStats(),
         )
         if not isinstance(response, requests.Response):
@@ -1099,7 +1127,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "-t",
         "--threads-count",
-        default=1000,
+        default=DEFAULT_THREADS_COUNT,
         type=int,
         help="Number of concurrent threads used to inspect RPC nodes",
     )
@@ -1149,7 +1177,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--measurement-time",
-        default=7,
+        default=DEFAULT_MEASUREMENT_TIME_SEC,
         type=int,
         help="Duration in seconds used for download speed measurement",
     )
@@ -1184,8 +1212,30 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="When no compatible incremental exists for a reusable local full snapshot, fall back to full snapshot discovery",
     )
-    parser.add_argument("--num-of-retries", default=5, type=int, help="Maximum number of attempts")
-    parser.add_argument("--sleep", default=7, type=int, help="Delay in seconds before the next retry")
+    parser.add_argument(
+        "--newer-snapshot-timeout",
+        default=DEFAULT_NEWER_SNAPSHOT_TIMEOUT_SEC,
+        type=int,
+        help="Overall time budget in seconds for searching a suitable newer snapshot set",
+    )
+    parser.add_argument(
+        "--get-rpc-peers-timeout",
+        default=DEFAULT_GET_RPC_PEERS_TIMEOUT_SEC,
+        type=int,
+        help="Timeout in seconds for fetching cluster RPC peers",
+    )
+    parser.add_argument(
+        "--blacklist-clear-threshold",
+        default=DEFAULT_BLACKLIST_CLEAR_THRESHOLD_SEC,
+        type=int,
+        help="Clear the runtime blacklist after this many seconds while searching, to mirror bootstrap-style peer recovery",
+    )
+    parser.add_argument(
+        "--rpc-probe-timeout",
+        default=DEFAULT_RPC_PROBE_TIMEOUT_SEC,
+        type=int,
+        help="Timeout in seconds for lightweight RPC probe requests such as HEAD checks and current-slot lookup",
+    )
     parser.add_argument(
         "--sort-order",
         default="latency",
@@ -1245,8 +1295,10 @@ def build_config(args: argparse.Namespace) -> Config:
         snapshots_path=snapshots_path,
         full_snapshot_archive_path=full_snapshot_archive_path,
         incremental_snapshot_archive_path=incremental_snapshot_archive_path,
-        num_of_retries=args.num_of_retries,
-        sleep_before_retry_sec=args.sleep,
+        newer_snapshot_timeout_sec=args.newer_snapshot_timeout,
+        get_rpc_peers_timeout_sec=args.get_rpc_peers_timeout,
+        blacklist_clear_threshold_sec=args.blacklist_clear_threshold,
+        rpc_probe_timeout_sec=args.rpc_probe_timeout,
         sort_order=sort_order,
         ip_blacklist=parse_csv_set(args.ip_blacklist),
         snapshot_blacklist=parse_csv_set(args.blacklist),
