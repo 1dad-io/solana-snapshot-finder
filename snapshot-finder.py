@@ -1133,11 +1133,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="Number of concurrent threads used to inspect RPC nodes",
     )
     parser.add_argument(
+        "-u",
+        "--url",
         "-r",
         "--rpc-address",
+        dest="url",
         default=DEFAULT_RPC_ADDRESS,
         type=str,
-        help="RPC address from which the current slot number will be taken",
+        help="Cluster RPC URL used for discovery and current slot lookup; --rpc-address is kept as a legacy alias",
     )
     parser.add_argument("--slot", default=0, type=int, help="Search for a snapshot with a specific slot")
     parser.add_argument("--version", default=None, help="Search for a snapshot from a specific validator version")
@@ -1270,7 +1273,7 @@ def build_config(args: argparse.Namespace) -> Config:
 
     return Config(
         threads_count=args.threads_count,
-        rpc_address=args.rpc_address,
+        rpc_address=args.url,
         specific_slot=int(args.slot),
         specific_version=args.version,
         wildcard_version=args.wildcard_version,

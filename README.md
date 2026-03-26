@@ -42,6 +42,8 @@ The CLI follows current validator conventions:
 
 You can keep a single snapshots directory, or split full and incremental archives across different paths.
 
+The cluster RPC flag also follows common Solana CLI conventions: use `-u` / `--url` as the primary form, while `--rpc-address` remains as a legacy alias.
+
 ## Selection behavior
 
 The tool prefers the freshest valid source that also satisfies your latency and download-speed requirements.
@@ -128,7 +130,7 @@ python3 snapshot-finder.py   --snapshots snapshots   --allow-full-snapshot-fallb
 Use a specific RPC to fetch cluster data:
 
 ```bash
-python3 snapshot-finder.py   --snapshots snapshots   --rpc-address https://api.mainnet-beta.solana.com
+python3 snapshot-finder.py   --snapshots snapshots   --url https://api.mainnet-beta.solana.com
 ```
 
 Include private RPC guesses derived from gossip:
@@ -204,7 +206,8 @@ The provided Dockerfile uses:
 
 ### Cluster and RPC options
 
-- `--rpc-address` — RPC endpoint used for cluster discovery and current-slot lookup
+- `-u`, `--url` — RPC endpoint used for cluster discovery and current-slot lookup
+- `--rpc-address` — legacy alias for `--url`
 - `--with-private-rpc` — also probe likely private RPC addresses derived from gossip data
 - `--internal-rpc-nodes` — comma-separated list of additional RPC endpoints to include directly
 
