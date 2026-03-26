@@ -48,7 +48,6 @@ DEFAULT_THREADS_COUNT = 32
 DEFAULT_MEASUREMENT_TIME_SEC = 5
 DEFAULT_NEWER_SNAPSHOT_TIMEOUT_SEC = 180
 DEFAULT_GET_RPC_PEERS_TIMEOUT_SEC = 300
-DEFAULT_BLACKLIST_CLEAR_THRESHOLD_SEC = 60
 DEFAULT_RPC_PROBE_TIMEOUT_SEC = 2
 
 
@@ -77,7 +76,6 @@ class Config:
     incremental_snapshot_archive_path: Path
     newer_snapshot_timeout_sec: int
     get_rpc_peers_timeout_sec: int
-    blacklist_clear_threshold_sec: int
     rpc_probe_timeout_sec: int
     sort_order: str
     ip_blacklist: set[str]
@@ -164,7 +162,6 @@ class SnapshotFinder:
             f"runtime_blacklist_ttl_sec={self.config.runtime_blacklist_ttl_sec}\n"
             f"newer_snapshot_timeout_sec={self.config.newer_snapshot_timeout_sec}\n"
             f"get_rpc_peers_timeout_sec={self.config.get_rpc_peers_timeout_sec}\n"
-            f"blacklist_clear_threshold_sec={self.config.blacklist_clear_threshold_sec}\n"
             f"rpc_probe_timeout_sec={self.config.rpc_probe_timeout_sec}\n"
             f"allow_full_snapshot_fallback={self.config.allow_full_snapshot_fallback}"
         )
@@ -172,7 +169,7 @@ class SnapshotFinder:
         with_private_rpc = self.config.with_private_rpc
         search_started_at = time.monotonic()
         newer_snapshot_deadline = search_started_at + self.config.newer_snapshot_timeout_sec
-        next_blacklist_clear_at = search_started_at + self.config.blacklist_clear_threshold_sec
+        next_blacklist_clear_at = search_started_at + self.config.runtime_blacklist_ttl_sec
         iteration = 1
 
         while time.monotonic() < newer_snapshot_deadline:
@@ -196,7 +193,7 @@ class SnapshotFinder:
 
             if time.monotonic() >= next_blacklist_clear_at:
                 self._clear_runtime_blacklist()
-                next_blacklist_clear_at += self.config.blacklist_clear_threshold_sec
+                next_blacklist_clear_at += self.config.runtime_blacklist_ttl_sec
 
             self._load_runtime_blacklist(state)
             self._load_local_full_snapshot(state)
@@ -669,7 +666,7 @@ class SnapshotFinder:
             return
         self.logger.info(
             "Clearing runtime blacklist after %ss to mirror bootstrap-style peer recovery",
-            self.config.blacklist_clear_threshold_sec,
+            self.config.runtime_blacklist_ttl_sec,
         )
         self._write_runtime_blacklist_entries({})
 
@@ -1225,12 +1222,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="Timeout in seconds for fetching cluster RPC peers",
     )
     parser.add_argument(
-        "--blacklist-clear-threshold",
-        default=DEFAULT_BLACKLIST_CLEAR_THRESHOLD_SEC,
-        type=int,
-        help="Clear the runtime blacklist after this many seconds while searching, to mirror bootstrap-style peer recovery",
-    )
-    parser.add_argument(
         "--rpc-probe-timeout",
         default=DEFAULT_RPC_PROBE_TIMEOUT_SEC,
         type=int,
@@ -1297,7 +1288,6 @@ def build_config(args: argparse.Namespace) -> Config:
         incremental_snapshot_archive_path=incremental_snapshot_archive_path,
         newer_snapshot_timeout_sec=args.newer_snapshot_timeout,
         get_rpc_peers_timeout_sec=args.get_rpc_peers_timeout,
-        blacklist_clear_threshold_sec=args.blacklist_clear_threshold,
         rpc_probe_timeout_sec=args.rpc_probe_timeout,
         sort_order=sort_order,
         ip_blacklist=parse_csv_set(args.ip_blacklist),

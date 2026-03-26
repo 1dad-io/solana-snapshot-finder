@@ -113,7 +113,7 @@ Require faster download sources:
 python3 snapshot-finder.py   --snapshots snapshots   --min-download-speed 120   --measurement-time 5
 ```
 
-Keep failing RPCs in the runtime blacklist for one hour:
+Keep failing RPCs in the runtime blacklist for 60 seconds:
 
 ```bash
 python3 snapshot-finder.py   --snapshots snapshots   --runtime-blacklist-ttl 60
@@ -230,9 +230,8 @@ The provided Dockerfile uses:
 - `--measurement-time` — number of seconds used for the download speed probe; defaults to 5
 - `--newer-snapshot-timeout` — overall time budget in seconds for searching a suitable newer snapshot set; defaults to 180
 - `--get-rpc-peers-timeout` — timeout in seconds for fetching cluster RPC peers; defaults to 300
-- `--blacklist-clear-threshold` — clear the runtime blacklist after this many seconds while searching; defaults to 60
 - `--rpc-probe-timeout` — timeout in seconds for lightweight RPC probe requests such as HEAD checks and current-slot lookup; defaults to 2
-- `--runtime-blacklist-ttl` — keep failing RPC snapshot sources in `blacklist.json` for this many seconds before auto-pruning them; use `0` to disable the persistent runtime blacklist; defaults to 60
+- `--runtime-blacklist-ttl` — keep failing RPC snapshot sources in `blacklist.json` for this many seconds before auto-pruning them; the same value is also used to clear the runtime blacklist mid-search to mirror bootstrap-style peer recovery; use `0` to disable the persistent runtime blacklist; defaults to 60
 - `--allow-full-snapshot-fallback` — when no compatible incremental exists for a reusable local full snapshot, fall back to full snapshot discovery instead of exiting cleanly with the local full only
 
 ### Exclusion and logging options
@@ -254,7 +253,7 @@ The tool writes:
 
 ## Notes
 
-- The default timeouts and concurrency are intentionally closer to bootstrap-style behavior: 32 concurrent probes, 5s speed measurement, 180s newer-snapshot budget, 300s peer-discovery timeout, 60s blacklist clearing, and 2s lightweight probe timeouts.
+- The default timeouts and concurrency are intentionally closer to bootstrap-style behavior: 32 concurrent probes, 5s speed measurement, 180s newer-snapshot budget, 300s peer-discovery timeout, a 60s runtime blacklist TTL/clear window, and 2s lightweight probe timeouts.
 - Make sure the validator uses a compatible `--maximum-local-snapshot-age` threshold, otherwise validator may still decide to fetch a newer incremental snapshot after the tool finishes.
 - The speed check is a short real download probe, not a theoretical estimate.
 - A local full snapshot is reused only when it is still fresh enough.
