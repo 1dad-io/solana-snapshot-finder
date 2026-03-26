@@ -257,9 +257,10 @@ The tool writes:
 - If a reusable local full snapshot exists, the tool switches to incremental-only recovery and searches only for compatible incrementals built on that full snapshot slot.
 - If no compatible incremental is found for a reusable local full snapshot, the default behavior is to keep that local full snapshot and exit cleanly.
 - `--allow-full-snapshot-fallback` makes the tool fall back to full snapshot discovery in that case.
-- If an incremental snapshot disappears because the full download took too long, the tool can retry discovery of a fresh compatible incremental and prefer the newest compatible incremental slot instead of taking the first matching source.
+- If an incremental snapshot disappears because the full download took too long, the tool can retry discovery of a fresh compatible incremental, prefer the newest compatible incremental slot, and try the next-best compatible source if the best replacement fails transiently.
 - After a full snapshot is downloaded successfully, the tool proactively searches for a compatible recent incremental snapshot instead of leaving that work to validator.
 - Failing RPC snapshot sources can be persisted in `blacklist.json` and auto-pruned after `--runtime-blacklist-ttl` seconds.
+- Transient replacement download failures such as rate limiting can cause the tool to blacklist that replacement source temporarily and try the next compatible replacement incremental.
 - If no suitable candidate is found, the tool retries and can expand the search by enabling private RPC probing.
 
 ## Troubleshooting

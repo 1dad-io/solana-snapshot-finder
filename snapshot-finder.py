@@ -338,21 +338,23 @@ class SnapshotFinder:
         return 1
 
 
-    def _find_replacement_incremental_candidate(
+    def _find_replacement_incremental_candidates(
         self,
         *,
         full_slot: int,
         state: ScanState,
         tried_urls: set[str],
-    ) -> Optional[tuple[str, Path]]:
+    ) -> list[tuple[str, Path]]:
         retry_state = ScanState(
             current_slot=state.current_slot,
             unsuitable_servers=set(state.unsuitable_servers),
+            runtime_blacklist=set(state.runtime_blacklist),
         )
+        self._load_runtime_blacklist(retry_state)
         self._load_local_full_snapshot(retry_state)
         candidates = self._rescan_candidates(retry_state)
         if not candidates:
-            return None
+            return []
 
         compatible_incrementals: list[tuple[int, float, str, Path]] = []
 
@@ -381,12 +383,8 @@ class SnapshotFinder:
                     )
                 )
 
-        if not compatible_incrementals:
-            return None
-
         compatible_incrementals.sort(key=lambda item: (-item[0], item[1]))
-        _, _, best_url, best_target_dir = compatible_incrementals[0]
-        return best_url, best_target_dir
+        return [(url, target_dir) for _, _, url, target_dir in compatible_incrementals]
 
     def _rescan_candidates(self, state: ScanState) -> list[SnapshotCandidate]:
         rpc_nodes = sorted(set(self.get_all_rpc_ips(state, with_private_rpc=True)))
@@ -417,23 +415,38 @@ class SnapshotFinder:
         state: ScanState,
         tried_urls: set[str],
     ) -> bool:
-        replacement = self._find_replacement_incremental_candidate(
+        replacements = self._find_replacement_incremental_candidates(
             full_slot=full_slot,
             state=state,
             tried_urls=tried_urls,
         )
-        if replacement is None:
+        if not replacements:
             return False
 
-        download_url, target_dir = replacement
-        tried_urls.add(download_url)
-        self.logger.info(
-            "Found replacement incremental snapshot for full slot %s: %s",
-            full_slot,
-            download_url,
-        )
-        self.download(download_url, target_dir)
-        return True
+        for download_url, target_dir in replacements:
+            tried_urls.add(download_url)
+            parsed = urlparse(download_url)
+            rpc_address = f"{parsed.hostname}:{parsed.port}" if parsed.hostname and parsed.port else None
+            self.logger.info(
+                "Found replacement incremental snapshot for full slot %s: %s",
+                full_slot,
+                download_url,
+            )
+            try:
+                self.download(download_url, target_dir)
+                return True
+            except DownloadError as exc:
+                self.logger.warning(
+                    "Replacement incremental snapshot download failed: %s (%s)",
+                    exc.url,
+                    exc,
+                )
+                if rpc_address:
+                    state.unsuitable_servers.add(rpc_address)
+                    self._add_to_runtime_blacklist(rpc_address, reason="replacement_incremental_failed")
+                continue
+
+        return False
 
 
     def _download_candidate_files(self, candidate: SnapshotCandidate, state: ScanState) -> None:
@@ -481,19 +494,12 @@ class SnapshotFinder:
                         "Incremental snapshot disappeared before download; retrying search for a newer compatible incremental for full slot %s",
                         active_full_slot,
                     )
-                    try:
-                        if self._download_replacement_incremental(
-                            full_slot=active_full_slot,
-                            state=state,
-                            tried_urls=tried_incremental_urls,
-                        ):
-                            continue
-                    except DownloadError as exc:
-                        self.logger.warning(
-                            "Replacement incremental snapshot download failed: %s (%s)",
-                            exc.url,
-                            exc,
-                        )
+                    if self._download_replacement_incremental(
+                        full_slot=active_full_slot,
+                        state=state,
+                        tried_urls=tried_incremental_urls,
+                    ):
+                        continue
                     self.logger.warning(
                         "No compatible replacement incremental snapshot was found; keeping the available full snapshot and skipping %s",
                         download_url,
@@ -510,19 +516,12 @@ class SnapshotFinder:
                         "Incremental snapshot became unavailable during download; retrying search for a newer compatible incremental for full slot %s",
                         active_full_slot,
                     )
-                    try:
-                        if active_full_slot is not None and self._download_replacement_incremental(
-                            full_slot=active_full_slot,
-                            state=state,
-                            tried_urls=tried_incremental_urls,
-                        ):
-                            continue
-                    except DownloadError as replacement_exc:
-                        self.logger.warning(
-                            "Replacement incremental snapshot download failed: %s (%s)",
-                            replacement_exc.url,
-                            replacement_exc,
-                        )
+                    if active_full_slot is not None and self._download_replacement_incremental(
+                        full_slot=active_full_slot,
+                        state=state,
+                        tried_urls=tried_incremental_urls,
+                    ):
+                        continue
                     self.logger.warning(
                         "No compatible replacement incremental snapshot was found; keeping the available full snapshot and skipping %s (%s)",
                         exc.url,
@@ -540,19 +539,12 @@ class SnapshotFinder:
                         "Full snapshot slot %s downloaded successfully; searching for a matching incremental snapshot",
                         active_full_slot,
                     )
-                    try:
-                        if self._download_replacement_incremental(
-                            full_slot=active_full_slot,
-                            state=state,
-                            tried_urls=tried_incremental_urls,
-                        ):
-                            continue
-                    except DownloadError as replacement_exc:
-                        self.logger.warning(
-                            "Matching incremental snapshot download failed after full download: %s (%s)",
-                            replacement_exc.url,
-                            replacement_exc,
-                        )
+                    if self._download_replacement_incremental(
+                        full_slot=active_full_slot,
+                        state=state,
+                        tried_urls=tried_incremental_urls,
+                    ):
+                        continue
                     self.logger.info(
                         "No compatible incremental snapshot was found after downloading full snapshot slot %s",
                         active_full_slot,
