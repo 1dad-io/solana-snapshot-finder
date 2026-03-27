@@ -1,8 +1,10 @@
 venv/
 
+# runtime
+*.json
 *.log
 *.tar
-*.bz2
+*.zst
 
 *~
 .DS_Store

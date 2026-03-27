@@ -50,6 +50,8 @@ The tool prefers the freshest valid source that also satisfies your latency and 
 
 When a local full snapshot already exists, the tool checks whether it is still fresh enough to reuse. If it is reusable, the tool treats that full snapshot as the recovery base and searches only for compatible incremental snapshots built on the same full snapshot slot. If no compatible incremental is currently available, the tool keeps the reusable local full snapshot and exits cleanly by default. If `--allow-full-snapshot-fallback` is enabled, it may fall back to full snapshot discovery instead. If no reusable local full snapshot exists, the tool downloads a full snapshot and then proactively searches for a matching recent incremental snapshot, even if the originally selected candidate did not include one.
 
+Replacement incremental rescans now respect the same `--with-private-rpc` setting as the main scan, so the tool does not silently expand from public RPCs to gossip-derived private RPC guesses unless you explicitly enable that mode.
+
 Incomplete downloads use the `.part` suffix until the transfer completes successfully.
 
 Failing RPC snapshot sources can also be written to a runtime `blacklist.json` under `--snapshots`. This blacklist helps retries avoid hammering the same broken source, and entries are automatically pruned after the configured TTL.
@@ -112,7 +114,7 @@ python3 snapshot-finder.py   --snapshots snapshots   --maximum-local-snapshot-ag
 Require faster download sources:
 
 ```bash
-python3 snapshot-finder.py   --snapshots snapshots   --min-download-speed 120   --measurement-time 5
+python3 snapshot-finder.py   --snapshots snapshots   --min-download-speed 100   --measurement-time 5
 ```
 
 Keep failing RPCs in the runtime blacklist for 60 seconds:
@@ -229,7 +231,7 @@ The provided Dockerfile uses:
 
 ### Time budgets, concurrency, and runtime blacklist options
 
-- `--threads-count` — number of worker threads used for RPC probing; defaults to 32 to stay closer to bootstrap-style peer evaluation
+- `--threads-count` — number of worker threads used for RPC probing; defaults to 512 so a typical public-RPC scan can fan out across the full discovered set faster
 - `--measurement-time` — number of seconds used for the download speed probe; defaults to 5
 - `--newer-snapshot-timeout` — overall time budget in seconds for searching a suitable newer snapshot set; defaults to 180
 - `--get-rpc-peers-timeout` — timeout in seconds for fetching cluster RPC peers; defaults to 300
@@ -255,7 +257,7 @@ The tool writes:
 
 ## Notes
 
-- The default timeouts and concurrency are intentionally closer to bootstrap-style behavior: 32 concurrent probes, 5s speed measurement, 180s newer-snapshot budget, 300s peer-discovery timeout, a 60s runtime blacklist TTL/clear window, and 2s lightweight probe timeouts.
+- The default timeouts and concurrency are intentionally closer to bootstrap-style behavior: 5s speed measurement, 180s newer-snapshot budget, 300s peer-discovery timeout, a 60s runtime blacklist TTL/clear window, and 2s lightweight probe timeouts.
 - Make sure the validator uses a compatible `--maximum-local-snapshot-age` threshold, otherwise validator may still decide to fetch a newer incremental snapshot after the tool finishes.
 - The speed check is a short real download probe, not a theoretical estimate.
 - A local full snapshot is reused only when it is still fresh enough.

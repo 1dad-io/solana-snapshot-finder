@@ -39,16 +39,24 @@ from multiprocessing.dummy import Pool as ThreadPool
 from requests import ConnectionError, ConnectTimeout, HTTPError, ReadTimeout, Timeout
 from tqdm import tqdm
 
+# Static defaults
 DEFAULT_HEADERS = {"Content-Type": "application/json"}
 DEFAULT_RPC_ADDRESS = "https://api.mainnet-beta.solana.com"
-DEFAULT_SPEED_TEST_LIMIT = 15
-DEFAULT_RUNTIME_BLACKLIST_TTL_SEC = 60
 DEFAULT_RUNTIME_BLACKLIST_FILENAME = "blacklist.json"
-DEFAULT_THREADS_COUNT = 32
+
+# Concurrency and candidate selection defaults
+DEFAULT_THREADS_COUNT = 512
+DEFAULT_MAX_LOCAL_SNAPSHOT_AGE = 2500
+DEFAULT_MIN_DOWNLOAD_SPEED_MB = 50
+DEFAULT_MAX_LATENCY = 100
 DEFAULT_MEASUREMENT_TIME_SEC = 5
+DEFAULT_SPEED_TEST_LIMIT = 15
+
+# Time budgets and probe defaults
+DEFAULT_RUNTIME_BLACKLIST_TTL_SEC = 60
+DEFAULT_RPC_PROBE_TIMEOUT_SEC = 2
 DEFAULT_NEWER_SNAPSHOT_TIMEOUT_SEC = 180
 DEFAULT_GET_RPC_PEERS_TIMEOUT_SEC = 300
-DEFAULT_RPC_PROBE_TIMEOUT_SEC = 2
 
 
 class DownloadError(RuntimeError):
@@ -399,7 +407,7 @@ class SnapshotFinder:
         return [(url, target_dir) for _, _, url, target_dir in compatible_incrementals]
 
     def _rescan_candidates(self, state: ScanState) -> list[SnapshotCandidate]:
-        rpc_nodes = sorted(set(self.get_all_rpc_ips(state, with_private_rpc=True)))
+        rpc_nodes = sorted(set(self.get_all_rpc_ips(state, with_private_rpc=self.config.with_private_rpc)))
         if not rpc_nodes:
             return []
 
@@ -1153,13 +1161,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--maximum-local-snapshot-age",
         "--max-snapshot-age",
         dest="maximum_local_snapshot_age",
-        default=2500,
+        default=DEFAULT_MAX_LOCAL_SNAPSHOT_AGE,
         type=int,
         help="Reuse a local full snapshot if it is within this many slots of the current cluster slot; --max-snapshot-age is kept as a legacy alias",
     )
     parser.add_argument(
         "--min-download-speed",
-        default=60,
+        default=DEFAULT_MIN_DOWNLOAD_SPEED_MB,
         type=int,
         help="Minimum average download speed in megabytes per second",
     )
@@ -1170,7 +1178,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--max-latency",
-        default=100,
+        default=DEFAULT_MAX_LATENCY,
         type=int,
         help="Maximum HEAD request latency in milliseconds",
     )
