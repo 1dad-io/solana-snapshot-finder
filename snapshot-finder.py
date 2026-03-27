@@ -71,8 +71,7 @@ class Config:
     threads_count: int
     rpc_address: str
     specific_slot: int
-    specific_version: Optional[str]
-    wildcard_version: Optional[str]
+    version_pattern: Optional[str]
     maximum_local_snapshot_age: int
     min_download_speed_mb: int
     max_download_speed_mb: Optional[int]
@@ -899,11 +898,17 @@ class SnapshotFinder:
         return sorted(rpc_ips)
 
     def _version_is_excluded(self, version: Optional[str]) -> bool:
-        if self.config.wildcard_version and version and self.config.wildcard_version not in version:
+        pattern = self.config.version_pattern
+        if not pattern:
+            return False
+        if not version:
             return True
-        if self.config.specific_version and version and version != self.config.specific_version:
-            return True
-        return False
+
+        if "*" in pattern:
+            prefix = pattern.split("*", 1)[0]
+            return not version.startswith(prefix)
+
+        return version != pattern
 
     def _resolve_internal_rpc_node(self, node: str) -> set[str]:
         if not node:
@@ -1151,11 +1156,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Cluster RPC URL used for discovery and current slot lookup; --rpc-address is kept as a legacy alias",
     )
     parser.add_argument("--slot", default=0, type=int, help="Search for a snapshot with a specific slot")
-    parser.add_argument("--version", default=None, help="Search for a snapshot from a specific validator version")
     parser.add_argument(
-        "--wildcard-version",
+        "--version",
         default=None,
-        help="Search for snapshots matching a major/minor version, for example 2.2",
+        help="Filter validator versions by exact value like 2.2.14 or wildcard pattern like 2.2.*",
     )
     parser.add_argument(
         "--maximum-local-snapshot-age",
@@ -1283,8 +1287,7 @@ def build_config(args: argparse.Namespace) -> Config:
         threads_count=args.threads_count,
         rpc_address=args.url,
         specific_slot=int(args.slot),
-        specific_version=args.version,
-        wildcard_version=args.wildcard_version,
+        version_pattern=args.version,
         maximum_local_snapshot_age=args.maximum_local_snapshot_age if not args.slot else 0,
         min_download_speed_mb=args.min_download_speed,
         max_download_speed_mb=args.max_download_speed,

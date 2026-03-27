@@ -9,7 +9,7 @@ It is built for operators who want more control than the validator's built-in sn
 ## Highlights
 
 - Dynamic snapshot source discovery from cluster RPC nodes
-- Filtering by snapshot age, validator version, and latency
+- Filtering by snapshot age, validator version patterns, and latency
 - Real transfer-speed probing before choosing a source
 - Separate full and incremental archive directories
 - Backward compatibility with the legacy `--snapshot-path` flag
@@ -147,10 +147,10 @@ Restrict results to a validator version:
 python3 snapshot-finder.py   --snapshots snapshots   --version 2.2.14
 ```
 
-Match a major/minor version series:
+Match a major/minor version series with a wildcard:
 
 ```bash
-python3 snapshot-finder.py   --snapshots snapshots   --wildcard-version 2.2
+python3 snapshot-finder.py   --snapshots snapshots   --version 2.2.*
 ```
 
 Search for a specific slot:
@@ -218,8 +218,7 @@ The provided Dockerfile uses:
 - `--slot` — target a specific full snapshot slot
 - `--maximum-local-snapshot-age` — primary flag for deciding whether a local full snapshot is still reusable
 - `--max-snapshot-age` — legacy alias for `--maximum-local-snapshot-age`
-- `--version` — require an exact validator version match
-- `--wildcard-version` — match a validator major/minor series such as `2.2`
+- `--version` — filter validator versions by exact value like `2.2.14` or wildcard pattern like `2.2.*`
 - `--sort-order` — candidate sort mode: `latency`, `latency_ms`, or `slots_diff`
 
 ### Network and speed options
