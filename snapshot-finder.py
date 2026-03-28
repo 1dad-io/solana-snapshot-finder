@@ -68,31 +68,37 @@ class DownloadError(RuntimeError):
 
 @dataclass(slots=True)
 class Config:
-    threads_count: int
     rpc_address: str
+    threads_count: int
+
     specific_slot: int
     version_pattern: Optional[str]
     maximum_local_snapshot_age: int
-    min_download_speed_mb: int
-    max_download_speed_mb: Optional[int]
-    max_latency_ms: int
-    with_private_rpc: bool
-    measurement_time_sec: int
-    slow_download_abort_time_sec: int
-    snapshots_path: Path
-    full_snapshot_archive_path: Path
-    incremental_snapshot_archive_path: Path
-    newer_snapshot_timeout_sec: int
-    get_rpc_peers_timeout_sec: int
-    rpc_probe_timeout_sec: int
     sort_order: str
     blacklist: set[str]
     internal_rpc_nodes: list[str]
+
+    min_download_speed_mb: int
+    max_download_speed_mb: Optional[int]
+    max_latency_ms: int
+    measurement_time_sec: int
+    slow_download_abort_time_sec: int
+
+    snapshots_path: Path
+    full_snapshot_archive_path: Path
+    incremental_snapshot_archive_path: Path
+
+    newer_snapshot_timeout_sec: int
+    get_rpc_peers_timeout_sec: int
+    rpc_probe_timeout_sec: int
+
+    with_private_rpc: bool
     verbose: bool
+
+    speed_test_limit: int = DEFAULT_SPEED_TEST_LIMIT
     runtime_blacklist_ttl_sec: int = DEFAULT_RUNTIME_BLACKLIST_TTL_SEC
     runtime_blacklist_filename: str = DEFAULT_RUNTIME_BLACKLIST_FILENAME
     allow_full_snapshot_fallback: bool = False
-    speed_test_limit: int = DEFAULT_SPEED_TEST_LIMIT
 
 
 @dataclass(slots=True)
@@ -1052,42 +1058,55 @@ class SnapshotFinder:
                 slow_since: Optional[float] = None
                 started_at = time.monotonic()
 
-                with open(temp_path, "wb") as handle:
-                    for chunk in response.iter_content(chunk_size=1024 * 1024):
-                        if not chunk:
-                            continue
+                progress_kwargs = {
+                    "desc": filename,
+                    "unit": "B",
+                    "unit_scale": True,
+                    "unit_divisor": 1024,
+                    "leave": True,
+                }
+                if total_bytes > 0:
+                    progress_kwargs["total"] = total_bytes
 
-                        now = time.monotonic()
-                        chunk_len = len(chunk)
+                with tqdm(**progress_kwargs) as progress_bar:
+                    with open(temp_path, "wb") as handle:
+                        for chunk in response.iter_content(chunk_size=1024 * 1024):
+                            if not chunk:
+                                continue
 
-                        if self.config.max_download_speed_mb is not None and self.config.max_download_speed_mb > 0:
-                            expected_elapsed = (downloaded_bytes + chunk_len) / (self.config.max_download_speed_mb * 1_000_000)
-                            actual_elapsed = now - started_at
-                            if expected_elapsed > actual_elapsed:
-                                time.sleep(expected_elapsed - actual_elapsed)
-                                now = time.monotonic()
+                            now = time.monotonic()
+                            chunk_len = len(chunk)
 
-                        handle.write(chunk)
-                        downloaded_bytes += chunk_len
+                            if self.config.max_download_speed_mb is not None and self.config.max_download_speed_mb > 0:
+                                expected_elapsed = (downloaded_bytes + chunk_len) / (self.config.max_download_speed_mb * 1_000_000)
+                                actual_elapsed = now - started_at
+                                if expected_elapsed > actual_elapsed:
+                                    time.sleep(expected_elapsed - actual_elapsed)
+                                    now = time.monotonic()
 
-                        speed_window.append((now, chunk_len))
-                        while speed_window and now - speed_window[0][0] > 5:
-                            speed_window.popleft()
+                            handle.write(chunk)
+                            downloaded_bytes += chunk_len
+                            progress_bar.update(chunk_len)
 
-                        bytes_in_window = sum(size for _, size in speed_window)
-                        span = max(now - speed_window[0][0], 0.001) if speed_window else 0.001
-                        rolling_speed_bps = bytes_in_window / span
+                            speed_window.append((now, chunk_len))
+                            while speed_window and now - speed_window[0][0] > 5:
+                                speed_window.popleft()
 
-                        if rolling_speed_bps < self.config.min_download_speed_mb * 1_000_000:
-                            if slow_since is None:
-                                slow_since = now
-                            elif now - slow_since >= self.config.slow_download_abort_time_sec:
-                                raise DownloadError(
-                                    "live download speed dropped below the minimum threshold for too long",
-                                    url=url,
-                                )
-                        else:
-                            slow_since = None
+                            bytes_in_window = sum(size for _, size in speed_window)
+                            span = max(now - speed_window[0][0], 0.001) if speed_window else 0.001
+                            rolling_speed_bps = bytes_in_window / span
+                            progress_bar.set_postfix_str(f"{convert_size(rolling_speed_bps)}/s")
+
+                            if rolling_speed_bps < self.config.min_download_speed_mb * 1_000_000:
+                                if slow_since is None:
+                                    slow_since = now
+                                elif now - slow_since >= self.config.slow_download_abort_time_sec:
+                                    raise DownloadError(
+                                        "live download speed dropped below the minimum threshold for too long",
+                                        url=url,
+                                    )
+                            else:
+                                slow_since = None
 
                 self.logger.info("Rename the downloaded file %s --> %s", temp_path, final_path)
                 os.rename(temp_path, final_path)
@@ -1189,13 +1208,8 @@ def parse_csv_list(value: str) -> list[str]:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Solana snapshot finder")
-    parser.add_argument(
-        "-t",
-        "--threads-count",
-        default=DEFAULT_THREADS_COUNT,
-        type=int,
-        help="Number of concurrent threads used to inspect RPC nodes",
-    )
+
+    # Cluster and discovery
     parser.add_argument(
         "-u",
         "--url",
@@ -1206,6 +1220,26 @@ def build_parser() -> argparse.ArgumentParser:
         type=str,
         help="Cluster RPC URL used for discovery and current slot lookup; --rpc-address is kept as a legacy alias",
     )
+    parser.add_argument(
+        "--with-private-rpc",
+        action="store_true",
+        help="Allow scanning derived private RPC endpoints from gossip addresses",
+    )
+    parser.add_argument(
+        "--internal-rpc-nodes",
+        default="",
+        type=str,
+        help="Comma-separated list of internal RPC nodes to include",
+    )
+    parser.add_argument(
+        "-t",
+        "--threads-count",
+        default=DEFAULT_THREADS_COUNT,
+        type=int,
+        help="Number of concurrent threads used to inspect RPC nodes",
+    )
+
+    # Snapshot selection
     parser.add_argument("--slot", default=0, type=int, help="Search for a snapshot with a specific slot")
     parser.add_argument(
         "--version",
@@ -1221,6 +1255,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="Reuse a local full snapshot if it is within this many slots of the current cluster slot; --max-snapshot-age is kept as a legacy alias",
     )
     parser.add_argument(
+        "--sort-order",
+        default="latency",
+        choices=["latency_ms", "slots_diff", "latency"],
+        help="Sort priority for discovered candidates",
+    )
+    parser.add_argument(
+        "-b",
+        "--blacklist",
+        default="",
+        type=str,
+        help="Comma-separated list of items to exclude, including RPC endpoints (ip:port), snapshot slots, or archive hashes",
+    )
+
+    # Network and download behavior
+    parser.add_argument(
         "--min-download-speed",
         default=DEFAULT_MIN_DOWNLOAD_SPEED_MB,
         type=int,
@@ -1229,7 +1278,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--max-download-speed",
         type=int,
-        help="Optional bandwidth limit in megabytes per second for wget",
+        help="Optional bandwidth limit in megabytes per second for the real download",
     )
     parser.add_argument(
         "--max-latency",
@@ -1238,15 +1287,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Maximum HEAD request latency in milliseconds",
     )
     parser.add_argument(
-        "--with-private-rpc",
-        action="store_true",
-        help="Allow scanning derived private RPC endpoints from gossip addresses",
-    )
-    parser.add_argument(
         "--measurement-time",
         default=DEFAULT_MEASUREMENT_TIME_SEC,
         type=int,
-        help="Duration in seconds used for download speed measurement",
+        help="Duration in seconds used for the initial download speed measurement",
     )
     parser.add_argument(
         "--slow-download-abort-time",
@@ -1254,6 +1298,8 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         help="Abort an active download if its rolling speed stays below --min-download-speed for this many seconds",
     )
+
+    # Paths
     parser.add_argument(
         "--snapshots",
         "--snapshot-path",
@@ -1274,17 +1320,8 @@ def build_parser() -> argparse.ArgumentParser:
         type=str,
         help="Directory where incremental snapshots will be stored; defaults to --snapshots",
     )
-    parser.add_argument(
-        "--runtime-blacklist-ttl",
-        default=DEFAULT_RUNTIME_BLACKLIST_TTL_SEC,
-        type=int,
-        help="Keep failing RPC snapshot sources in blacklist.json for this many seconds; use 0 to disable it",
-    )
-    parser.add_argument(
-        "--allow-full-snapshot-fallback",
-        action="store_true",
-        help="When no compatible incremental exists for a reusable local full snapshot, fall back to full snapshot discovery",
-    )
+
+    # Search budgets and probe timing
     parser.add_argument(
         "--newer-snapshot-timeout",
         default=DEFAULT_NEWER_SNAPSHOT_TIMEOUT_SEC,
@@ -1304,23 +1341,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="Timeout in seconds for lightweight RPC probe requests such as HEAD checks and current-slot lookup",
     )
     parser.add_argument(
-        "--sort-order",
-        default="latency",
-        choices=["latency_ms", "slots_diff", "latency"],
-        help="Sort priority for discovered candidates",
+        "--runtime-blacklist-ttl",
+        default=DEFAULT_RUNTIME_BLACKLIST_TTL_SEC,
+        type=int,
+        help="Keep failing RPC snapshot sources in blacklist.json for this many seconds; use 0 to disable it",
     )
+
+    # Behavior toggles and logging
     parser.add_argument(
-        "-b",
-        "--blacklist",
-        default="",
-        type=str,
-        help="Comma-separated list of items to exclude, including RPC endpoints (ip:port), snapshot slots, or archive hashes",
-    )
-    parser.add_argument(
-        "--internal-rpc-nodes",
-        default="",
-        type=str,
-        help="Comma-separated list of internal RPC nodes to include",
+        "--allow-full-snapshot-fallback",
+        action="store_true",
+        help="When no compatible incremental exists for a reusable local full snapshot, fall back to full snapshot discovery",
     )
     parser.add_argument("-v", "--verbose", action="store_true", help="Enable debug logging")
     return parser
@@ -1341,30 +1372,36 @@ def build_config(args: argparse.Namespace) -> Config:
     sort_order = "latency_ms" if args.sort_order == "latency" else args.sort_order
 
     return Config(
-        threads_count=args.threads_count,
         rpc_address=args.url,
+        threads_count=args.threads_count,
+
         specific_slot=int(args.slot),
         version_pattern=args.version,
         maximum_local_snapshot_age=args.maximum_local_snapshot_age if not args.slot else 0,
-        min_download_speed_mb=args.min_download_speed,
-        max_download_speed_mb=args.max_download_speed,
-        max_latency_ms=args.max_latency,
-        with_private_rpc=args.with_private_rpc,
-        measurement_time_sec=args.measurement_time,
-        slow_download_abort_time_sec=args.slow_download_abort_time,
-        snapshots_path=snapshots_path,
-        full_snapshot_archive_path=full_snapshot_archive_path,
-        incremental_snapshot_archive_path=incremental_snapshot_archive_path,
-        newer_snapshot_timeout_sec=args.newer_snapshot_timeout,
-        get_rpc_peers_timeout_sec=args.get_rpc_peers_timeout,
-        rpc_probe_timeout_sec=args.rpc_probe_timeout,
         sort_order=sort_order,
         blacklist=parse_csv_set(args.blacklist),
         internal_rpc_nodes=parse_csv_list(args.internal_rpc_nodes),
-        verbose=args.verbose,
+
+        min_download_speed_mb=args.min_download_speed,
+        max_download_speed_mb=args.max_download_speed,
+        max_latency_ms=args.max_latency,
+        measurement_time_sec=args.measurement_time,
+        slow_download_abort_time_sec=args.slow_download_abort_time,
+        speed_test_limit=DEFAULT_SPEED_TEST_LIMIT,
+
+        snapshots_path=snapshots_path,
+        full_snapshot_archive_path=full_snapshot_archive_path,
+        incremental_snapshot_archive_path=incremental_snapshot_archive_path,
+
+        newer_snapshot_timeout_sec=args.newer_snapshot_timeout,
+        get_rpc_peers_timeout_sec=args.get_rpc_peers_timeout,
+        rpc_probe_timeout_sec=args.rpc_probe_timeout,
         runtime_blacklist_ttl_sec=args.runtime_blacklist_ttl,
         runtime_blacklist_filename=DEFAULT_RUNTIME_BLACKLIST_FILENAME,
+
+        with_private_rpc=args.with_private_rpc,
         allow_full_snapshot_fallback=args.allow_full_snapshot_fallback,
+        verbose=args.verbose,
     )
 
 

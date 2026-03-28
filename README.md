@@ -226,14 +226,12 @@ The provided Dockerfile uses:
 - `--max-latency` — maximum acceptable RPC latency in milliseconds
 - `--min-download-speed` — minimum measured download speed in MB/s
 - `--max-download-speed` — upper bound for acceptable measured download speed in MB/s
-- `--measurement-time` — number of seconds used for the initial download speed probe
-- `--slow-download-abort-time` — abort an active download if its rolling speed stays below `--min-download-speed` for this many seconds
+- `--measurement-time` — number of seconds used for the initial download speed probe; defaults to 5
+- `--slow-download-abort-time` — abort an active download if its rolling speed stays below `--min-download-speed` for this many seconds; defaults to 15
 
 ### Time budgets, concurrency, and runtime blacklist options
 
 - `--threads-count` — number of worker threads used for RPC probing; defaults to 512 so a typical public-RPC scan can fan out across the full discovered set faster
-- `--measurement-time` — number of seconds used for the initial download speed probe; defaults to 5
-- `--slow-download-abort-time` — abort an active download if its rolling speed stays below `--min-download-speed` for this many seconds; defaults to 15
 - `--newer-snapshot-timeout` — overall time budget in seconds for searching a suitable newer snapshot set; defaults to 180
 - `--get-rpc-peers-timeout` — timeout in seconds for fetching cluster RPC peers; defaults to 300
 - `--rpc-probe-timeout` — timeout in seconds for lightweight RPC probe requests such as HEAD checks and current-slot lookup; defaults to 2
