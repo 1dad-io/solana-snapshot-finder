@@ -219,12 +219,12 @@ The provided Dockerfile uses:
 - `--maximum-local-snapshot-age` — primary flag for deciding whether a local full snapshot is still reusable
 - `--max-snapshot-age` — legacy alias for `--maximum-local-snapshot-age`
 - `--version` — filter validator versions by exact value like `2.2.14` or wildcard pattern like `2.2.*`
-- `--sort-order` — candidate sort mode: `latency`, `latency_ms`, or `slots_diff`
+- `--sort-order` — candidate sort mode: `latency` or `slots_diff`; defaults to `latency`
 
 ### Network and speed options
 
-- `--max-latency` — maximum acceptable RPC latency in milliseconds
-- `--min-download-speed` — minimum measured download speed in MB/s
+- `--max-latency` — maximum acceptable RPC latency in milliseconds; defaults to 100
+- `--min-download-speed` — minimum measured download speed in MB/s; defaults to 50
 - `--max-download-speed` — upper bound for acceptable measured download speed in MB/s
 - `--measurement-time` — number of seconds used for the initial download speed probe; defaults to 5
 - `--slow-download-abort-time` — abort an active download if its rolling speed stays below `--min-download-speed` for this many seconds; defaults to 15

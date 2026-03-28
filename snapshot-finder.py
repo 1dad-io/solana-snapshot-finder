@@ -1257,7 +1257,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--sort-order",
         default="latency",
-        choices=["latency_ms", "slots_diff", "latency"],
+        choices=["latency", "slots_diff"],
         help="Sort priority for discovered candidates",
     )
     parser.add_argument(
