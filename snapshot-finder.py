@@ -15,6 +15,7 @@ with --snapshots as the primary directory flag.
 
 from __future__ import annotations
 
+from collections import deque
 import argparse
 import glob
 import ipaddress
@@ -22,10 +23,8 @@ import json
 import logging
 import math
 import os
-import shutil
 import socket
 import statistics
-import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
@@ -50,6 +49,7 @@ DEFAULT_MAX_LOCAL_SNAPSHOT_AGE = 2500
 DEFAULT_MIN_DOWNLOAD_SPEED_MB = 50
 DEFAULT_MAX_LATENCY = 100
 DEFAULT_MEASUREMENT_TIME_SEC = 5
+DEFAULT_SLOW_DOWNLOAD_ABORT_TIME_SEC = 15
 DEFAULT_SPEED_TEST_LIMIT = 15
 
 # Time budgets and probe defaults
@@ -78,6 +78,7 @@ class Config:
     max_latency_ms: int
     with_private_rpc: bool
     measurement_time_sec: int
+    slow_download_abort_time_sec: int
     snapshots_path: Path
     full_snapshot_archive_path: Path
     incremental_snapshot_archive_path: Path
@@ -138,14 +139,10 @@ class SnapshotFinder:
     def __init__(self, config: Config) -> None:
         self.config = config
         self.logger = logging.getLogger(__name__)
-        self.wget_path = shutil.which("wget")
         self._append_lock = Lock()
         self._pbar_lock = Lock()
         self._blacklist_lock = Lock()
         self._pbar: Optional[tqdm] = None
-
-        if self.wget_path is None:
-            raise RuntimeError("The wget utility was not found in the system, it is required")
 
     def run(self) -> int:
         self._ensure_paths()
@@ -165,6 +162,7 @@ class SnapshotFinder:
             f"with_private_rpc={self.config.with_private_rpc}\n"
             f"sort_order={self.config.sort_order}\n"
             f"measurement_time_sec={self.config.measurement_time_sec}\n"
+            f"slow_download_abort_time_sec={self.config.slow_download_abort_time_sec}\n"
             f"runtime_blacklist_ttl_sec={self.config.runtime_blacklist_ttl_sec}\n"
             f"newer_snapshot_timeout_sec={self.config.newer_snapshot_timeout_sec}\n"
             f"get_rpc_peers_timeout_sec={self.config.get_rpc_peers_timeout_sec}\n"
@@ -1038,21 +1036,74 @@ class SnapshotFinder:
         temp_path = target_dir / f"{filename}.part"
         final_path = target_dir / filename
 
-        command = [self.wget_path, "--progress=dot:giga", "--trust-server-names"]
-        if self.config.max_download_speed_mb is not None:
-            command.append(f"--limit-rate={self.config.max_download_speed_mb}M")
-        command.extend([url, f"-O{temp_path}"])
+        if temp_path.exists():
+            temp_path.unlink()
 
-        result = subprocess.run(command, stdout=subprocess.PIPE, universal_newlines=True)
-        if result.returncode != 0:
-            raise DownloadError(
-                f"wget exited with non-zero code {result.returncode}",
-                url=url,
-                returncode=result.returncode,
-            )
+        try:
+            with requests.get(
+                url,
+                stream=True,
+                timeout=(self.config.rpc_probe_timeout_sec, self.config.rpc_probe_timeout_sec),
+            ) as response:
+                response.raise_for_status()
+                total_bytes = int(response.headers.get("content-length", 0))
+                downloaded_bytes = 0
+                speed_window = deque()
+                slow_since: Optional[float] = None
+                started_at = time.monotonic()
 
-        self.logger.info("Rename the downloaded file %s --> %s", temp_path, final_path)
-        os.rename(temp_path, final_path)
+                with open(temp_path, "wb") as handle:
+                    for chunk in response.iter_content(chunk_size=1024 * 1024):
+                        if not chunk:
+                            continue
+
+                        now = time.monotonic()
+                        chunk_len = len(chunk)
+
+                        if self.config.max_download_speed_mb is not None and self.config.max_download_speed_mb > 0:
+                            expected_elapsed = (downloaded_bytes + chunk_len) / (self.config.max_download_speed_mb * 1_000_000)
+                            actual_elapsed = now - started_at
+                            if expected_elapsed > actual_elapsed:
+                                time.sleep(expected_elapsed - actual_elapsed)
+                                now = time.monotonic()
+
+                        handle.write(chunk)
+                        downloaded_bytes += chunk_len
+
+                        speed_window.append((now, chunk_len))
+                        while speed_window and now - speed_window[0][0] > 5:
+                            speed_window.popleft()
+
+                        bytes_in_window = sum(size for _, size in speed_window)
+                        span = max(now - speed_window[0][0], 0.001) if speed_window else 0.001
+                        rolling_speed_bps = bytes_in_window / span
+
+                        if rolling_speed_bps < self.config.min_download_speed_mb * 1_000_000:
+                            if slow_since is None:
+                                slow_since = now
+                            elif now - slow_since >= self.config.slow_download_abort_time_sec:
+                                raise DownloadError(
+                                    "live download speed dropped below the minimum threshold for too long",
+                                    url=url,
+                                )
+                        else:
+                            slow_since = None
+
+                self.logger.info("Rename the downloaded file %s --> %s", temp_path, final_path)
+                os.rename(temp_path, final_path)
+
+        except requests.HTTPError as exc:
+            if temp_path.exists():
+                temp_path.unlink()
+            raise DownloadError(str(exc), url=url) from exc
+        except (ReadTimeout, ConnectTimeout, HTTPError, Timeout, ConnectionError, requests.RequestException) as exc:
+            if temp_path.exists():
+                temp_path.unlink()
+            raise DownloadError(str(exc), url=url) from exc
+        except DownloadError:
+            if temp_path.exists():
+                temp_path.unlink()
+            raise
 
     def _ensure_paths(self) -> None:
         for path in {self.config.full_snapshot_archive_path, self.config.incremental_snapshot_archive_path}:
@@ -1198,6 +1249,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Duration in seconds used for download speed measurement",
     )
     parser.add_argument(
+        "--slow-download-abort-time",
+        default=DEFAULT_SLOW_DOWNLOAD_ABORT_TIME_SEC,
+        type=int,
+        help="Abort an active download if its rolling speed stays below --min-download-speed for this many seconds",
+    )
+    parser.add_argument(
         "--snapshots",
         "--snapshot-path",
         dest="snapshots",
@@ -1294,6 +1351,7 @@ def build_config(args: argparse.Namespace) -> Config:
         max_latency_ms=args.max_latency,
         with_private_rpc=args.with_private_rpc,
         measurement_time_sec=args.measurement_time,
+        slow_download_abort_time_sec=args.slow_download_abort_time,
         snapshots_path=snapshots_path,
         full_snapshot_archive_path=full_snapshot_archive_path,
         incremental_snapshot_archive_path=incremental_snapshot_archive_path,

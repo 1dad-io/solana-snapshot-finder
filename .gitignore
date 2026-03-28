@@ -3,7 +3,9 @@ venv/
 # runtime
 *.json
 *.log
+*.part
 *.tar
+*.bz2
 *.zst
 
 *~

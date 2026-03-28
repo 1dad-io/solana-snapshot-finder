@@ -3,12 +3,17 @@ venv/
 __pycache__/
 *.pyc
 *.pyo
+
+# runtime
+*.json
 *.log
+*.part
 *.tar
 *.bz2
 *.zst
-*.part
+
 *~
 .DS_Store
+
 .git/
 .gitignore

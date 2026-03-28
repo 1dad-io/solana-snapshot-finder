@@ -11,6 +11,7 @@ It is built for operators who want more control than the validator's built-in sn
 - Dynamic snapshot source discovery from cluster RPC nodes
 - Filtering by snapshot age, validator version patterns, and latency
 - Real transfer-speed probing before choosing a source
+- Live download speed enforcement during the actual transfer
 - Separate full and incremental archive directories
 - Backward compatibility with the legacy `--snapshot-path` flag
 - `snapshot.json`, `snapshot-finder.log`, and runtime `blacklist.json` output for debugging and automation
@@ -61,7 +62,6 @@ Failing RPC snapshot sources can also be written to a runtime `blacklist.json` u
 ## Requirements
 
 - Python 3.10+
-- `wget`
 - Network access to Solana validator RPC endpoints
 
 Python dependencies are listed in `requirements.txt`.
@@ -80,7 +80,7 @@ Ubuntu packages:
 
 ```bash
 sudo apt-get update
-sudo apt-get install -y python3-venv wget git
+sudo apt-get install -y python3-venv git
 ```
 
 ## Quick start
@@ -114,7 +114,7 @@ python3 snapshot-finder.py   --snapshots snapshots   --maximum-local-snapshot-ag
 Require faster download sources:
 
 ```bash
-python3 snapshot-finder.py   --snapshots snapshots   --min-download-speed 100   --measurement-time 5
+python3 snapshot-finder.py   --snapshots snapshots   --min-download-speed 100   --measurement-time 5   --slow-download-abort-time 15
 ```
 
 Keep failing RPCs in the runtime blacklist for 60 seconds:
@@ -226,12 +226,14 @@ The provided Dockerfile uses:
 - `--max-latency` — maximum acceptable RPC latency in milliseconds
 - `--min-download-speed` — minimum measured download speed in MB/s
 - `--max-download-speed` — upper bound for acceptable measured download speed in MB/s
-- `--measurement-time` — number of seconds used for the download speed probe
+- `--measurement-time` — number of seconds used for the initial download speed probe
+- `--slow-download-abort-time` — abort an active download if its rolling speed stays below `--min-download-speed` for this many seconds
 
 ### Time budgets, concurrency, and runtime blacklist options
 
 - `--threads-count` — number of worker threads used for RPC probing; defaults to 512 so a typical public-RPC scan can fan out across the full discovered set faster
-- `--measurement-time` — number of seconds used for the download speed probe; defaults to 5
+- `--measurement-time` — number of seconds used for the initial download speed probe; defaults to 5
+- `--slow-download-abort-time` — abort an active download if its rolling speed stays below `--min-download-speed` for this many seconds; defaults to 15
 - `--newer-snapshot-timeout` — overall time budget in seconds for searching a suitable newer snapshot set; defaults to 180
 - `--get-rpc-peers-timeout` — timeout in seconds for fetching cluster RPC peers; defaults to 300
 - `--rpc-probe-timeout` — timeout in seconds for lightweight RPC probe requests such as HEAD checks and current-slot lookup; defaults to 2
@@ -259,6 +261,7 @@ The tool writes:
 - The default timeouts and concurrency are intentionally closer to bootstrap-style behavior: 5s speed measurement, 180s newer-snapshot budget, 300s peer-discovery timeout, a 60s runtime blacklist TTL/clear window, and 2s lightweight probe timeouts.
 - Make sure the validator uses a compatible `--maximum-local-snapshot-age` threshold, otherwise validator may still decide to fetch a newer incremental snapshot after the tool finishes.
 - The speed check is a short real download probe, not a theoretical estimate.
+- The tool also enforces `--min-download-speed` during the real transfer and can abort a source that becomes too slow mid-download.
 - A local full snapshot is reused only when it is still fresh enough.
 - If a reusable local full snapshot exists, the tool switches to incremental-only recovery and searches only for compatible incrementals built on that full snapshot slot.
 - If no compatible incremental is found for a reusable local full snapshot, the default behavior is to keep that local full snapshot and exit cleanly.
@@ -270,10 +273,6 @@ The tool writes:
 - The search now uses Agave-style time budgets rather than fixed retry counts, and can expand to private-RPC probing while the newer-snapshot search budget remains available.
 
 ## Troubleshooting
-
-### `wget` not found
-
-Install `wget` and retry.
 
 ### Existing partial downloads
 
