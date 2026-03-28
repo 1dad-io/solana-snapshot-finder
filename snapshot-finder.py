@@ -457,6 +457,16 @@ class SnapshotFinder:
             )
             try:
                 self.download(download_url, target_dir)
+                effective_age = state.current_slot - full_slot
+                parsed_incremental = parse_snapshot_filename(download_url)
+                if parsed_incremental.kind == "incremental":
+                    effective_age = state.current_slot - parsed_incremental.snapshot_slot
+                    self.logger.info(
+                        "Bootstrap-ready snapshot set prepared: full_slot=%s incremental_slot=%s effective_age=%s",
+                        full_slot,
+                        parsed_incremental.snapshot_slot,
+                        effective_age,
+                    )
                 return True
             except DownloadError as exc:
                 self.logger.warning(
@@ -526,7 +536,7 @@ class SnapshotFinder:
 
                     if self._is_full_snapshot_standalone_usable(full_slot=active_full_slot, current_slot=state.current_slot):
                         self.logger.warning(
-                            "No compatible replacement incremental snapshot was found; keeping the available standalone-usable full snapshot and skipping %s",
+                            "No compatible replacement incremental snapshot was found; keeping the available standalone-usable full snapshot as the bootstrap-ready result and skipping %s",
                             download_url,
                         )
                         continue
@@ -555,7 +565,7 @@ class SnapshotFinder:
 
                     if self._is_full_snapshot_standalone_usable(full_slot=active_full_slot, current_slot=state.current_slot):
                         self.logger.warning(
-                            "No compatible replacement incremental snapshot was found; keeping the available standalone-usable full snapshot and skipping %s (%s)",
+                            "No compatible replacement incremental snapshot was found; keeping the available standalone-usable full snapshot as the bootstrap-ready result and skipping %s (%s)",
                             exc.url,
                             exc,
                         )
@@ -584,6 +594,11 @@ class SnapshotFinder:
                         continue
 
                     if self._is_full_snapshot_standalone_usable(full_slot=active_full_slot, current_slot=state.current_slot):
+                        self.logger.info(
+                            "Standalone full snapshot is bootstrap-ready under --maximum-local-snapshot-age: full_slot=%s effective_age=%s",
+                            active_full_slot,
+                            state.current_slot - active_full_slot,
+                        )
                         self.logger.info(
                             "No compatible incremental snapshot was found after downloading full snapshot slot %s, but the full snapshot is standalone-usable under --maximum-local-snapshot-age",
                             active_full_slot,
@@ -864,7 +879,7 @@ class SnapshotFinder:
         local_full_age = state.current_slot - latest[1]
         state.local_full_snapshot_is_usable = 0 <= local_full_age <= self.config.maximum_local_snapshot_age
         self.logger.info(
-            "Found full local snapshot %s | local_full_snapshot_slot=%s | local_full_age=%s | reusable=%s",
+            "Found local full snapshot %s | full_snapshot_slot=%s | full_snapshot_age=%s | standalone_reusable=%s",
             state.local_full_snapshot_path,
             state.local_full_snapshot_slot,
             local_full_age,
