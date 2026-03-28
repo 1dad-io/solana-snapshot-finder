@@ -523,11 +523,18 @@ class SnapshotFinder:
                         tried_urls=tried_incremental_urls,
                     ):
                         continue
-                    self.logger.warning(
-                        "No compatible replacement incremental snapshot was found; keeping the available full snapshot and skipping %s",
-                        download_url,
+
+                    if self._is_full_snapshot_standalone_usable(full_slot=active_full_slot, current_slot=state.current_slot):
+                        self.logger.warning(
+                            "No compatible replacement incremental snapshot was found; keeping the available standalone-usable full snapshot and skipping %s",
+                            download_url,
+                        )
+                        continue
+
+                    raise DownloadError(
+                        "compatible incremental snapshot is still required because the active full snapshot is older than --maximum-local-snapshot-age",
+                        url=download_url,
                     )
-                    continue
 
             self.logger.info("Downloading %s to %s", download_url, target_dir)
 
@@ -545,12 +552,19 @@ class SnapshotFinder:
                         tried_urls=tried_incremental_urls,
                     ):
                         continue
-                    self.logger.warning(
-                        "No compatible replacement incremental snapshot was found; keeping the available full snapshot and skipping %s (%s)",
-                        exc.url,
-                        exc,
-                    )
-                    continue
+
+                    if self._is_full_snapshot_standalone_usable(full_slot=active_full_slot, current_slot=state.current_slot):
+                        self.logger.warning(
+                            "No compatible replacement incremental snapshot was found; keeping the available standalone-usable full snapshot and skipping %s (%s)",
+                            exc.url,
+                            exc,
+                        )
+                        continue
+
+                    raise DownloadError(
+                        "compatible incremental snapshot is still required because the active full snapshot is older than --maximum-local-snapshot-age",
+                        url=exc.url,
+                    ) from exc
                 raise
 
             if file_info.kind == "full":
@@ -568,9 +582,17 @@ class SnapshotFinder:
                         tried_urls=tried_incremental_urls,
                     ):
                         continue
-                    self.logger.info(
-                        "No compatible incremental snapshot was found after downloading full snapshot slot %s",
-                        active_full_slot,
+
+                    if self._is_full_snapshot_standalone_usable(full_slot=active_full_slot, current_slot=state.current_slot):
+                        self.logger.info(
+                            "No compatible incremental snapshot was found after downloading full snapshot slot %s, but the full snapshot is standalone-usable under --maximum-local-snapshot-age",
+                            active_full_slot,
+                        )
+                        continue
+
+                    raise DownloadError(
+                        "downloaded full snapshot still requires a compatible incremental because it is older than --maximum-local-snapshot-age",
+                        url=self._build_download_url(candidate.snapshot_address, relative_path),
                     )
 
     def _snapshot_file_still_available(self, download_url: str) -> bool:
@@ -580,6 +602,12 @@ class SnapshotFinder:
         if response.status_code >= 400:
             return False
         return True
+
+    def _is_full_snapshot_standalone_usable(self, *, full_slot: Optional[int], current_slot: int) -> bool:
+        if full_slot is None:
+            return False
+        full_age = current_slot - full_slot
+        return 0 <= full_age <= self.config.maximum_local_snapshot_age
 
 
 
