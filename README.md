@@ -20,16 +20,15 @@ It is built for operators who want more control than the validator's built-in sn
 
 ```mermaid
 flowchart TD
-    A[Get current slot] --> B[Fetch cluster nodes]
-    B --> C[Resolve RPC endpoints]
-    C --> D[Probe full and incremental snapshot redirects]
-    D --> E[Filter by age, version, latency, and archive rules]
-    E --> F[Sort candidates]
-    F --> G[Measure download speed on top candidates]
-    G --> H{Suitable source found?}
-    H -- No --> I[Retry / expand search]
-    H -- Yes --> J[Download full and or incremental archives]
-    J --> K[Write snapshot.json and logs]
+    A[Get current slot and cluster nodes] --> B[Discover and filter snapshot sources]
+    B --> C[Sort candidates and measure speed]
+    C --> D{Usable local full snapshot?}
+    D -- Yes --> E[Fetch compatible incremental]
+    D -- No --> F[Download full snapshot]
+    F --> G[Fetch matching incremental if needed]
+    E --> H[Bootstrap-ready snapshot set]
+    G --> H
+    H --> I[Write snapshot.json and logs]
 ```
 
 ## Snapshot paths
