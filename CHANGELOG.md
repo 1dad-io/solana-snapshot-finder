@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## v0.4.1
+
+### Fixed
+- Avoid re-downloading the same full snapshot across later candidates after the full archive is already present locally; reuse the local full snapshot and keep retrying only compatible incrementals.
+
 ## v0.4.0
 
 ### Added

@@ -153,7 +153,7 @@ class SnapshotFinder:
     def run(self) -> int:
         self._ensure_paths()
 
-        self.logger.info("Version: 0.4.0")
+        self.logger.info("Version: 0.4.1")
         self.logger.info("https://github.com/1dad-io/solana-snapshot-finder")
         self.logger.info(
             "Configuration:\n"
@@ -346,7 +346,7 @@ class SnapshotFinder:
                 return 0
             except DownloadError as exc:
                 self.logger.warning(
-                    "Download failed for %s: %s. Adding it to runtime blacklist and trying the next candidate",
+                    "Download failed for %s: %s. Adding it to runtime blacklist and trying the next candidate; any already-downloaded matching full snapshot will be reused",
                     candidate.snapshot_address,
                     exc,
                 )
@@ -484,7 +484,7 @@ class SnapshotFinder:
 
     def _download_candidate_files(self, candidate: SnapshotCandidate, state: ScanState) -> None:
         full_downloaded_in_this_run = False
-        active_full_slot = state.local_full_snapshot_slot if state.local_full_snapshot_is_usable else None
+        active_full_slot = state.local_full_snapshot_slot
         tried_incremental_urls: set[str] = set()
         has_incremental_in_candidate = any(
             parse_snapshot_filename(path).kind == "incremental"
@@ -496,10 +496,13 @@ class SnapshotFinder:
 
             if (
                 file_info.kind == "full"
-                and state.local_full_snapshot_is_usable
+                and state.local_full_snapshot_slot is not None
                 and file_info.full_slot == state.local_full_snapshot_slot
             ):
-                self.logger.info("Skipping download of existing reusable full snapshot %s", relative_path)
+                self.logger.info(
+                    "Skipping download of already-present local full snapshot %s; reusing it as the incremental recovery base",
+                    relative_path,
+                )
                 active_full_slot = state.local_full_snapshot_slot
                 continue
 
@@ -580,6 +583,12 @@ class SnapshotFinder:
             if file_info.kind == "full":
                 full_downloaded_in_this_run = True
                 active_full_slot = file_info.full_slot
+                state.local_full_snapshot_slot = file_info.full_slot
+                state.local_full_snapshot_path = target_dir / file_info.filename
+                state.local_full_snapshot_is_usable = self._is_full_snapshot_standalone_usable(
+                    full_slot=file_info.full_slot,
+                    current_slot=state.current_slot,
+                )
 
                 if not has_incremental_in_candidate and active_full_slot is not None:
                     self.logger.info(
