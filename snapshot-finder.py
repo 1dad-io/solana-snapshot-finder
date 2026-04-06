@@ -153,7 +153,7 @@ class SnapshotFinder:
     def run(self) -> int:
         self._ensure_paths()
 
-        self.logger.info("Version: 0.4.1")
+        self.logger.info("Version: 0.4.2")
         self.logger.info("https://github.com/1dad-io/solana-snapshot-finder")
         self.logger.info(
             "Configuration:\n"
@@ -307,6 +307,20 @@ class SnapshotFinder:
 
     def _select_and_download_candidate(self, candidates: list[SnapshotCandidate], state: ScanState) -> int:
         for index, candidate in enumerate(candidates[: self.config.speed_test_limit], start=1):
+            if (
+                state.local_full_snapshot_slot is not None
+                and not state.local_full_snapshot_is_usable
+                and not self._candidate_matches_local_full(candidate, state.local_full_snapshot_slot)
+            ):
+                self.logger.info(
+                    "%s/%s skipping candidate %s because incremental-only recovery is active for local full slot %s",
+                    index,
+                    len(candidates),
+                    candidate.snapshot_address,
+                    state.local_full_snapshot_slot,
+                )
+                continue
+
             if self._is_blacklisted(candidate):
                 self.logger.info("%s/%s BLACKLISTED --> %s", index, len(candidates), candidate)
                 continue
@@ -761,7 +775,7 @@ class SnapshotFinder:
                 if not self._is_slot_diff_acceptable(slots_diff, state.stats):
                     return
 
-                if state.local_full_snapshot_is_usable:
+                if state.local_full_snapshot_slot is not None:
                     if state.local_full_snapshot_slot == incremental_file.base_slot:
                         self._append_candidate(
                             state,
@@ -795,7 +809,7 @@ class SnapshotFinder:
                     )
                     return
 
-            if state.local_full_snapshot_is_usable:
+            if state.local_full_snapshot_slot is not None:
                 return
 
             full_response = self.do_request(
@@ -899,6 +913,8 @@ class SnapshotFinder:
         latest: Optional[tuple[Path, int]] = None
         for path_string in glob.glob(str(self.config.full_snapshot_archive_path / "snapshot-*tar*")):
             path = Path(path_string)
+            if path.name.endswith(".part"):
+                continue
             try:
                 file_info = parse_snapshot_filename(path.name)
             except ValueError:
@@ -1070,6 +1086,20 @@ class SnapshotFinder:
             stats.discarded_by_slot += 1
             return False
         return True
+
+    def _candidate_matches_local_full(self, candidate: SnapshotCandidate, full_slot: int) -> bool:
+        for relative_path in candidate.files_to_download:
+            try:
+                file_info = parse_snapshot_filename(relative_path)
+            except ValueError:
+                continue
+
+            if file_info.kind == "incremental" and file_info.base_slot == full_slot:
+                return True
+            if file_info.kind == "full" and file_info.full_slot == full_slot:
+                return True
+
+        return False
 
     def _is_blacklisted(self, candidate: SnapshotCandidate) -> bool:
         if not self.config.blacklist:
