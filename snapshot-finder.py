@@ -136,6 +136,7 @@ class ScanState:
     local_full_snapshot_path: Optional[Path] = None
     local_full_snapshot_slot: Optional[int] = None
     local_full_snapshot_is_usable: bool = False
+    active_incremental_base_slot: Optional[int] = None
     runtime_blacklist: set[str] = field(default_factory=set)
     candidates: list[SnapshotCandidate] = field(default_factory=list)
     stats: AttemptStats = field(default_factory=AttemptStats)
@@ -307,16 +308,15 @@ class SnapshotFinder:
     def _select_and_download_candidate(self, candidates: list[SnapshotCandidate], state: ScanState) -> int:
         for index, candidate in enumerate(candidates[: self.config.speed_test_limit], start=1):
             if (
-                state.local_full_snapshot_slot is not None
-                and not state.local_full_snapshot_is_usable
-                and not self._candidate_matches_local_full(candidate, state.local_full_snapshot_slot)
+                state.active_incremental_base_slot is not None
+                and not self._candidate_matches_local_full(candidate, state.active_incremental_base_slot)
             ):
                 self.logger.info(
-                    "%s/%s skipping candidate %s because incremental-only recovery is active for local full slot %s",
+                    "%s/%s skipping candidate %s because incremental-only recovery is active for full slot %s",
                     index,
                     len(candidates),
                     candidate.snapshot_address,
-                    state.local_full_snapshot_slot,
+                    state.active_incremental_base_slot,
                 )
                 continue
 
@@ -385,6 +385,7 @@ class SnapshotFinder:
             current_slot=state.current_slot,
             unsuitable_servers=set(state.unsuitable_servers),
             runtime_blacklist=set(state.runtime_blacklist),
+            active_incremental_base_slot=full_slot,
         )
         self._load_runtime_blacklist(retry_state)
         self._load_local_full_snapshot(retry_state)
@@ -497,7 +498,7 @@ class SnapshotFinder:
 
     def _download_candidate_files(self, candidate: SnapshotCandidate, state: ScanState) -> None:
         full_downloaded_in_this_run = False
-        active_full_slot = state.local_full_snapshot_slot
+        active_full_slot = state.active_incremental_base_slot
         tried_incremental_urls: set[str] = set()
         has_incremental_in_candidate = any(
             parse_snapshot_filename(path).kind == "incremental"
@@ -509,14 +510,14 @@ class SnapshotFinder:
 
             if (
                 file_info.kind == "full"
-                and state.local_full_snapshot_slot is not None
-                and file_info.full_slot == state.local_full_snapshot_slot
+                and state.active_incremental_base_slot is not None
+                and file_info.full_slot == state.active_incremental_base_slot
             ):
                 self.logger.info(
                     "Skipping download of already-present local full snapshot %s; reusing it as the incremental recovery base",
                     relative_path,
                 )
-                active_full_slot = state.local_full_snapshot_slot
+                active_full_slot = state.active_incremental_base_slot
                 continue
 
             download_url = self._build_download_url(candidate.snapshot_address, relative_path)
@@ -602,6 +603,7 @@ class SnapshotFinder:
                     full_slot=file_info.full_slot,
                     current_slot=state.current_slot,
                 )
+                state.active_incremental_base_slot = file_info.full_slot
 
                 if not has_incremental_in_candidate and active_full_slot is not None:
                     self.logger.info(
@@ -774,8 +776,8 @@ class SnapshotFinder:
                 if not self._is_incremental_slot_diff_acceptable(slots_diff, state.stats):
                     return
 
-                if state.local_full_snapshot_slot is not None:
-                    if state.local_full_snapshot_slot == incremental_file.base_slot:
+                if state.active_incremental_base_slot is not None:
+                    if state.active_incremental_base_slot == incremental_file.base_slot:
                         self._append_candidate(
                             state,
                             SnapshotCandidate(
@@ -808,7 +810,7 @@ class SnapshotFinder:
                     )
                     return
 
-            if state.local_full_snapshot_slot is not None:
+            if state.active_incremental_base_slot is not None:
                 return
 
             full_response = self.do_request(
@@ -900,6 +902,7 @@ class SnapshotFinder:
         state.local_full_snapshot_slot = latest[1]
         local_full_age = state.current_slot - latest[1]
         state.local_full_snapshot_is_usable = 0 <= local_full_age <= self.config.maximum_local_snapshot_age
+        state.active_incremental_base_slot = latest[1] if state.local_full_snapshot_is_usable else None
         self.logger.info(
             "Found local full snapshot %s | full_snapshot_slot=%s | full_snapshot_age=%s | standalone_reusable=%s",
             state.local_full_snapshot_path,
