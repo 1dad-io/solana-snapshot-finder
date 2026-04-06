@@ -208,7 +208,11 @@ class SnapshotFinder:
 
             self._load_runtime_blacklist(state)
             self._load_local_full_snapshot(state)
-            result = self._scan_and_download(state, with_private_rpc=with_private_rpc)
+            result = self._scan_and_download(
+                state,
+                with_private_rpc=with_private_rpc,
+                deadline_monotonic=newer_snapshot_deadline,
+            )
             if result == 0:
                 self.logger.info("Done")
                 return 0
@@ -222,6 +226,20 @@ class SnapshotFinder:
         )
         return 1
 
+    def _budget_remaining_sec(self, deadline_monotonic: float) -> float:
+        return deadline_monotonic - time.monotonic()
+
+    def _budget_expired(self, deadline_monotonic: float) -> bool:
+        return self._budget_remaining_sec(deadline_monotonic) <= 0
+
+    def _check_budget_or_raise(self, deadline_monotonic: float, context: str) -> None:
+        remaining = self._budget_remaining_sec(deadline_monotonic)
+        if remaining <= 0:
+            raise DownloadError(
+                f"newer snapshot search budget expired while {context}",
+                url="budget-expired",
+            )
+
     def _scan_rpc_nodes(self, rpc_nodes: list[str], state: ScanState) -> None:
         self.logger.info("Searching information about snapshots on all found RPCs")
         with tqdm(total=len(rpc_nodes)) as progress_bar:
@@ -234,7 +252,13 @@ class SnapshotFinder:
                 pool.join()
                 self._pbar = None
 
-    def _scan_and_download(self, state: ScanState, *, with_private_rpc: bool) -> int:
+    def _scan_and_download(
+        self,
+        state: ScanState,
+        *,
+        with_private_rpc: bool,
+        deadline_monotonic: float,
+    ) -> int:
         rpc_nodes = sorted(set(self.get_all_rpc_ips(state, with_private_rpc=with_private_rpc)))
         self.logger.info(
             "RPC servers in total: %s | Current slot number: %s",
@@ -303,13 +327,29 @@ class SnapshotFinder:
 
         candidates = sorted(state.candidates, key=lambda item: getattr(item, self.config.sort_order))
         self._write_snapshot_json(rpc_nodes, candidates, state)
-        return self._select_and_download_candidate(candidates, state)
+        return self._select_and_download_candidate(
+            candidates,
+            state,
+            deadline_monotonic=deadline_monotonic,
+        )
 
-    def _select_and_download_candidate(self, candidates: list[SnapshotCandidate], state: ScanState) -> int:
+    def _select_and_download_candidate(
+        self,
+        candidates: list[SnapshotCandidate],
+        state: ScanState,
+        *,
+        deadline_monotonic: float,
+    ) -> int:
         grouped_candidates = self._group_candidates_by_snapshot_set(candidates)
         total_groups = len(grouped_candidates)
 
         for group_index, (_, group_candidates) in enumerate(grouped_candidates, start=1):
+            if self._budget_expired(deadline_monotonic):
+                self.logger.warning(
+                    "Stopping snapshot-set selection because the newer snapshot search budget is exhausted"
+                )
+                return 1
+
             representative = group_candidates[0]
 
             if (
@@ -336,6 +376,13 @@ class SnapshotFinder:
             group_had_active_base_failure = False
 
             for peer_index, candidate in enumerate(group_candidates, start=1):
+                if self._budget_expired(deadline_monotonic):
+                    self.logger.warning(
+                        "Stopping retries for snapshot set rooted at full slot %s because the newer snapshot search budget is exhausted",
+                        state.active_incremental_base_slot,
+                    )
+                    return 1
+
                 if self._is_blacklisted(candidate):
                     self.logger.info(
                         "%s/%s peer %s/%s BLACKLISTED --> %s",
@@ -385,7 +432,11 @@ class SnapshotFinder:
 
                 self.logger.info("Suitable snapshot server found: candidate=%s speed=%s", candidate, speed_human)
                 try:
-                    self._download_candidate_files(candidate, state)
+                    self._download_candidate_files(
+                        candidate,
+                        state,
+                        deadline_monotonic=deadline_monotonic,
+                    )
                     return 0
                 except DownloadError as exc:
                     self.logger.warning(
@@ -424,6 +475,7 @@ class SnapshotFinder:
         full_slot: int,
         state: ScanState,
         tried_urls: set[str],
+        deadline_monotonic: float,
     ) -> list[tuple[str, Path]]:
         retry_state = ScanState(
             current_slot=state.current_slot,
@@ -433,7 +485,7 @@ class SnapshotFinder:
         )
         self._load_runtime_blacklist(retry_state)
         self._load_local_full_snapshot(retry_state)
-        candidates = self._rescan_candidates(retry_state)
+        candidates = self._rescan_candidates(retry_state, deadline_monotonic=deadline_monotonic)
         if not candidates:
             return []
 
@@ -467,7 +519,10 @@ class SnapshotFinder:
         compatible_incrementals.sort(key=lambda item: (-item[0], item[1]))
         return [(url, target_dir) for _, _, url, target_dir in compatible_incrementals]
 
-    def _rescan_candidates(self, state: ScanState) -> list[SnapshotCandidate]:
+    def _rescan_candidates(self, state: ScanState, *, deadline_monotonic: float) -> list[SnapshotCandidate]:
+        if self._budget_expired(deadline_monotonic):
+            return []
+
         rpc_nodes = sorted(set(self.get_all_rpc_ips(state, with_private_rpc=self.config.with_private_rpc)))
         if not rpc_nodes:
             return []
@@ -495,16 +550,25 @@ class SnapshotFinder:
         full_slot: int,
         state: ScanState,
         tried_urls: set[str],
+        deadline_monotonic: float,
     ) -> bool:
         replacements = self._find_replacement_incremental_candidates(
             full_slot=full_slot,
             state=state,
             tried_urls=tried_urls,
+            deadline_monotonic=deadline_monotonic,
         )
         if not replacements:
             return False
 
         for download_url, target_dir in replacements:
+            if self._budget_expired(deadline_monotonic):
+                self.logger.warning(
+                    "Stopping replacement incremental attempts for full slot %s because the newer snapshot search budget is exhausted",
+                    full_slot,
+                )
+                return False
+
             tried_urls.add(download_url)
             parsed = urlparse(download_url)
             rpc_address = f"{parsed.hostname}:{parsed.port}" if parsed.hostname and parsed.port else None
@@ -540,7 +604,13 @@ class SnapshotFinder:
         return False
 
 
-    def _download_candidate_files(self, candidate: SnapshotCandidate, state: ScanState) -> None:
+    def _download_candidate_files(
+        self,
+        candidate: SnapshotCandidate,
+        state: ScanState,
+        *,
+        deadline_monotonic: float,
+    ) -> None:
         full_downloaded_in_this_run = False
         active_full_slot = state.active_incremental_base_slot
         tried_incremental_urls: set[str] = set()
@@ -550,6 +620,7 @@ class SnapshotFinder:
         )
 
         for relative_path in candidate.files_to_download:
+            self._check_budget_or_raise(deadline_monotonic, "processing snapshot candidate files")
             file_info = parse_snapshot_filename(relative_path)
 
             if (
@@ -592,6 +663,7 @@ class SnapshotFinder:
                         full_slot=active_full_slot,
                         state=state,
                         tried_urls=tried_incremental_urls,
+                        deadline_monotonic=deadline_monotonic,
                     ):
                         continue
 
@@ -607,6 +679,7 @@ class SnapshotFinder:
                         url=download_url,
                     )
 
+            self._check_budget_or_raise(deadline_monotonic, "starting a snapshot download")
             self.logger.info("Downloading %s to %s", download_url, target_dir)
 
             try:
@@ -621,6 +694,7 @@ class SnapshotFinder:
                         full_slot=active_full_slot,
                         state=state,
                         tried_urls=tried_incremental_urls,
+                        deadline_monotonic=deadline_monotonic,
                     ):
                         continue
 
@@ -658,6 +732,7 @@ class SnapshotFinder:
                         full_slot=active_full_slot,
                         state=state,
                         tried_urls=tried_incremental_urls,
+                        deadline_monotonic=deadline_monotonic,
                     ):
                         continue
 

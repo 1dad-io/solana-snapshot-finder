@@ -10,6 +10,7 @@ All notable changes to this project will be documented in this file.
 - Stop treating `--maximum-local-snapshot-age` as a hard filter for older remote full snapshots during discovery when those full snapshots can still be paired with a recent enough incremental snapshot.
 - Activate incremental-only recovery only for a reusable local full snapshot or for a full snapshot downloaded during the current search flow, instead of getting stuck on stale non-reusable local full snapshots found on disk.
 - Handle peers snapshot-set-first so identical full+incremental pairs are exhausted together, avoiding repeated dead-end retries and avoiding a second full download in the same pass after a chosen pair collapses.
+- Enforce the global newer-snapshot search budget inside snapshot-set peer retries and replacement-incremental rescans so one dead snapshot set cannot consume the whole run unchecked.
 
 ### Changed
 - Align `.gitignore` and `.dockerignore` with current snapshot archive formats by removing `*.tar` and adding `*.lz4`.
