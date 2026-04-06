@@ -1296,6 +1296,24 @@ class SnapshotFinder:
             return self.config.incremental_snapshot_archive_path
         return self.config.full_snapshot_archive_path
 
+    def _format_progress_desc(self, filename: str) -> str:
+        try:
+            file_info = parse_snapshot_filename(filename)
+        except ValueError:
+            return filename
+
+        if file_info.kind == "full" and file_info.full_slot is not None:
+            return f"snapshot-{file_info.full_slot}"
+
+        if (
+            file_info.kind == "incremental"
+            and file_info.base_slot is not None
+            and file_info.snapshot_slot is not None
+        ):
+            return f"incremental-snapshot-{file_info.base_slot}-{file_info.snapshot_slot}"
+
+        return filename
+
     def download(self, url: str, target_dir: Path) -> None:
         filename = os.path.basename(urlparse(url).path)
         temp_path = target_dir / f"{filename}.part"
@@ -1318,7 +1336,7 @@ class SnapshotFinder:
                 started_at = time.monotonic()
 
                 progress_kwargs = {
-                    "desc": filename,
+                    "desc": self._format_progress_desc(filename),
                     "unit": "B",
                     "unit_scale": True,
                     "unit_divisor": 1024,
