@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## v0.4.2
+
+### Fixed
+- Keep the search in incremental-only recovery mode after a full snapshot has already been downloaded locally for the active base slot, instead of downloading newer full snapshots during the same search flow.
+- Ignore `.part` files when detecting the latest local full snapshot so incomplete downloads are not treated as valid local recovery bases.
+
+### Changed
+- Align `.gitignore` and `.dockerignore` with current snapshot archive formats by removing `*.tar` and adding `*.lz4`.
+
 ## v0.4.1
 
 ### Fixed
