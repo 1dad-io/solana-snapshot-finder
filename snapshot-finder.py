@@ -306,69 +306,113 @@ class SnapshotFinder:
         return self._select_and_download_candidate(candidates, state)
 
     def _select_and_download_candidate(self, candidates: list[SnapshotCandidate], state: ScanState) -> int:
-        for index, candidate in enumerate(candidates[: self.config.speed_test_limit], start=1):
+        grouped_candidates = self._group_candidates_by_snapshot_set(candidates)
+        total_groups = len(grouped_candidates)
+
+        for group_index, (_, group_candidates) in enumerate(grouped_candidates, start=1):
+            representative = group_candidates[0]
+
             if (
                 state.active_incremental_base_slot is not None
-                and not self._candidate_matches_local_full(candidate, state.active_incremental_base_slot)
+                and not self._candidate_matches_local_full(representative, state.active_incremental_base_slot)
             ):
                 self.logger.info(
-                    "%s/%s skipping candidate %s because incremental-only recovery is active for full slot %s",
-                    index,
-                    len(candidates),
-                    candidate.snapshot_address,
+                    "%s/%s skipping snapshot set from %s because incremental-only recovery is active for full slot %s",
+                    group_index,
+                    total_groups,
+                    representative.snapshot_address,
                     state.active_incremental_base_slot,
                 )
                 continue
 
-            if self._is_blacklisted(candidate):
-                self.logger.info("%s/%s BLACKLISTED --> %s", index, len(candidates), candidate)
-                continue
+            self.logger.info(
+                "%s/%s trying snapshot set advertised by %s across %s peer(s)",
+                group_index,
+                total_groups,
+                representative.snapshot_address,
+                len(group_candidates),
+            )
 
-            if candidate.snapshot_address in state.unsuitable_servers:
+            group_had_active_base_failure = False
+
+            for peer_index, candidate in enumerate(group_candidates, start=1):
+                if self._is_blacklisted(candidate):
+                    self.logger.info(
+                        "%s/%s peer %s/%s BLACKLISTED --> %s",
+                        group_index,
+                        total_groups,
+                        peer_index,
+                        len(group_candidates),
+                        candidate,
+                    )
+                    continue
+
+                if candidate.snapshot_address in state.unsuitable_servers:
+                    self.logger.info(
+                        "RPC node already in unsuitable list --> skip %s",
+                        candidate.snapshot_address,
+                    )
+                    continue
+
                 self.logger.info(
-                    "RPC node already in unsuitable list --> skip %s",
-                    candidate.snapshot_address,
+                    "%s/%s peer %s/%s checking the speed %s",
+                    group_index,
+                    total_groups,
+                    peer_index,
+                    len(group_candidates),
+                    candidate,
                 )
-                continue
+                try:
+                    speed_bytes_per_second = self.measure_speed(
+                        url=candidate.snapshot_address,
+                        measure_time=self.config.measurement_time_sec,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    self.logger.warning(
+                        "Speed check failed for %s: %s. Adding it to runtime blacklist",
+                        candidate.snapshot_address,
+                        exc,
+                    )
+                    state.unsuitable_servers.add(candidate.snapshot_address)
+                    self._add_to_runtime_blacklist(candidate.snapshot_address, reason="speed_check_failed")
+                    continue
 
-            self.logger.info("%s/%s checking the speed %s", index, len(candidates), candidate)
-            try:
-                speed_bytes_per_second = self.measure_speed(
-                    url=candidate.snapshot_address,
-                    measure_time=self.config.measurement_time_sec,
-                )
-            except Exception as exc:  # noqa: BLE001
+                speed_human = convert_size(speed_bytes_per_second)
+                if speed_bytes_per_second < self.config.min_download_speed_mb * 1e6:
+                    self.logger.info("Too slow: candidate=%s speed=%s", candidate, speed_human)
+                    state.unsuitable_servers.add(candidate.snapshot_address)
+                    continue
+
+                self.logger.info("Suitable snapshot server found: candidate=%s speed=%s", candidate, speed_human)
+                try:
+                    self._download_candidate_files(candidate, state)
+                    return 0
+                except DownloadError as exc:
+                    self.logger.warning(
+                        "Download failed for %s: %s. Adding it to runtime blacklist and trying the next peer for this snapshot set",
+                        candidate.snapshot_address,
+                        exc,
+                    )
+                    state.unsuitable_servers.add(candidate.snapshot_address)
+                    self._add_to_runtime_blacklist(candidate.snapshot_address, reason="download_failed")
+
+                    if (
+                        state.active_incremental_base_slot is not None
+                        and self._candidate_matches_local_full(candidate, state.active_incremental_base_slot)
+                    ):
+                        group_had_active_base_failure = True
+                    continue
+
+            if group_had_active_base_failure:
                 self.logger.warning(
-                    "Speed check failed for %s: %s. Adding it to runtime blacklist",
-                    candidate.snapshot_address,
-                    exc,
+                    "Exhausted all peers for snapshot set rooted at full slot %s without finding a compatible incremental. "
+                    "Keeping the already-downloaded full snapshot and returning to outer discovery instead of downloading a second full in the same pass",
+                    state.active_incremental_base_slot,
                 )
-                state.unsuitable_servers.add(candidate.snapshot_address)
-                self._add_to_runtime_blacklist(candidate.snapshot_address, reason="speed_check_failed")
-                continue
-            speed_human = convert_size(speed_bytes_per_second)
-
-            if speed_bytes_per_second < self.config.min_download_speed_mb * 1e6:
-                self.logger.info("Too slow: candidate=%s speed=%s", candidate, speed_human)
-                state.unsuitable_servers.add(candidate.snapshot_address)
-                continue
-
-            self.logger.info("Suitable snapshot server found: candidate=%s speed=%s", candidate, speed_human)
-            try:
-                self._download_candidate_files(candidate, state)
-                return 0
-            except DownloadError as exc:
-                self.logger.warning(
-                    "Download failed for %s: %s. Adding it to runtime blacklist and trying the next candidate; any already-downloaded matching full snapshot will be reused",
-                    candidate.snapshot_address,
-                    exc,
-                )
-                state.unsuitable_servers.add(candidate.snapshot_address)
-                self._add_to_runtime_blacklist(candidate.snapshot_address, reason="download_failed")
-                continue
+                return 1
 
         self.logger.error(
-            "No snapshot nodes were found matching the given parameters: min_download_speed_mb=%s",
+            "No snapshot nodes were found that satisfied the current speed and snapshot requirements: min_download_speed_mb=%s",
             self.config.min_download_speed_mb,
         )
         return 1
@@ -1108,6 +1152,35 @@ class SnapshotFinder:
                 return True
 
         return False
+
+    def _snapshot_set_key(self, candidate: SnapshotCandidate) -> tuple[tuple[str, Optional[int], Optional[int], int], ...]:
+        key_parts: list[tuple[str, Optional[int], Optional[int], int]] = []
+        for relative_path in candidate.files_to_download:
+            file_info = parse_snapshot_filename(relative_path)
+            key_parts.append(
+                (
+                    file_info.kind,
+                    file_info.full_slot,
+                    file_info.base_slot,
+                    file_info.snapshot_slot,
+                )
+            )
+        return tuple(sorted(key_parts))
+
+    def _group_candidates_by_snapshot_set(
+        self, candidates: list[SnapshotCandidate]
+    ) -> list[tuple[tuple[tuple[str, Optional[int], Optional[int], int], ...], list[SnapshotCandidate]]]:
+        grouped: dict[tuple[tuple[str, Optional[int], Optional[int], int], ...], list[SnapshotCandidate]] = {}
+        ordered_keys: list[tuple[tuple[str, Optional[int], Optional[int], int], ...]] = []
+
+        for candidate in candidates[: self.config.speed_test_limit]:
+            key = self._snapshot_set_key(candidate)
+            if key not in grouped:
+                grouped[key] = []
+                ordered_keys.append(key)
+            grouped[key].append(candidate)
+
+        return [(key, grouped[key]) for key in ordered_keys]
 
     def _is_blacklisted(self, candidate: SnapshotCandidate) -> bool:
         if not self.config.blacklist:
