@@ -8,9 +8,9 @@ __pycache__/
 *.json
 *.log
 *.part
-*.tar
 *.bz2
 *.zst
+*.lz4
 
 *~
 .DS_Store
