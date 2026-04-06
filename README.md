@@ -56,7 +56,7 @@ Incomplete downloads use the `.part` suffix until the transfer completes success
 
 Failing RPC snapshot sources can also be written to a runtime `blacklist.json` under `--snapshots`. This blacklist helps retries avoid hammering the same broken source, and entries are automatically pruned after the configured TTL.
 
-`--maximum-local-snapshot-age` is the primary validator-aligned flag for deciding whether a local full snapshot is still reusable. `--max-snapshot-age` is kept as a legacy compatibility alias.
+`--maximum-local-snapshot-age` is the primary validator-aligned flag for deciding whether a local full snapshot is still reusable and whether a final snapshot set is fresh enough. It is not used as a hard filter for older remote full snapshots when those full snapshots can still be paired with a sufficiently recent incremental snapshot. `--max-snapshot-age` is kept as a legacy compatibility alias.
 
 ## Requirements
 
@@ -257,6 +257,7 @@ The tool writes:
 
 - The default timeouts and concurrency are intentionally closer to bootstrap-style behavior: 5s speed measurement, 180s newer-snapshot budget, 300s peer-discovery timeout, a 60s runtime blacklist TTL/clear window, and 2s lightweight probe timeouts.
 - Make sure the validator uses a compatible `--maximum-local-snapshot-age` threshold, otherwise validator may still decide to fetch a newer incremental snapshot after the tool finishes.
+- `--maximum-local-snapshot-age` is applied to local full snapshot reuse and final bootstrap readiness; remote full snapshots may still be considered when they can be paired with a recent enough incremental snapshot.
 - The speed check is a short real download probe, not a theoretical estimate.
 - The tool also enforces `--min-download-speed` during the real transfer and can abort a source that becomes too slow mid-download.
 - A local full snapshot is reused only when it is still fresh enough.

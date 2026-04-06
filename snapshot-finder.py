@@ -296,8 +296,7 @@ class SnapshotFinder:
                 )
                 return 0
             self.logger.info(
-                "No snapshot nodes were found matching the given parameters: maximum_local_snapshot_age=%s",
-                self.config.maximum_local_snapshot_age,
+                "No snapshot nodes were found matching the current search filters during this iteration"
             )
             return 1
 
@@ -772,7 +771,7 @@ class SnapshotFinder:
                     return
 
                 slots_diff = state.current_slot - incremental_file.snapshot_slot
-                if not self._is_slot_diff_acceptable(slots_diff, state.stats):
+                if not self._is_incremental_slot_diff_acceptable(slots_diff, state.stats):
                     return
 
                 if state.local_full_snapshot_slot is not None:
@@ -828,7 +827,7 @@ class SnapshotFinder:
 
             full_file = parse_snapshot_filename(full_path)
             slots_diff = state.current_slot - full_file.snapshot_slot
-            if not self._is_slot_diff_acceptable(slots_diff, state.stats):
+            if not self._is_full_slot_diff_acceptable(slots_diff, state.stats):
                 return
 
             latency_ms = full_response.elapsed.total_seconds() * 1000
@@ -1078,11 +1077,17 @@ class SnapshotFinder:
     def _response_exceeds_latency(self, response) -> bool:
         return self.is_redirect_response(response) and response.elapsed.total_seconds() * 1000 > self.config.max_latency_ms
 
-    def _is_slot_diff_acceptable(self, slots_diff: int, stats: AttemptStats) -> bool:
+    def _is_incremental_slot_diff_acceptable(self, slots_diff: int, stats: AttemptStats) -> bool:
         if slots_diff < -100:
             stats.discarded_by_slot += 1
             return False
         if slots_diff > self.config.maximum_local_snapshot_age:
+            stats.discarded_by_slot += 1
+            return False
+        return True
+
+    def _is_full_slot_diff_acceptable(self, slots_diff: int, stats: AttemptStats) -> bool:
+        if slots_diff < -100:
             stats.discarded_by_slot += 1
             return False
         return True
