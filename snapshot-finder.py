@@ -137,6 +137,7 @@ class ScanState:
     local_full_snapshot_slot: Optional[int] = None
     local_full_snapshot_is_usable: bool = False
     active_incremental_base_slot: Optional[int] = None
+    recovery_grace_active: bool = False
     runtime_blacklist: set[str] = field(default_factory=set)
     candidates: list[SnapshotCandidate] = field(default_factory=list)
     stats: AttemptStats = field(default_factory=AttemptStats)
@@ -376,7 +377,7 @@ class SnapshotFinder:
             group_had_active_base_failure = False
 
             for peer_index, candidate in enumerate(group_candidates, start=1):
-                if self._budget_expired(deadline_monotonic):
+                if self._budget_expired(deadline_monotonic) and not state.recovery_grace_active:
                     self.logger.warning(
                         "Stopping retries for snapshot set rooted at full slot %s because the newer snapshot search budget is exhausted",
                         state.active_incremental_base_slot,
@@ -739,6 +740,7 @@ class SnapshotFinder:
                     current_slot=state.current_slot,
                 )
                 state.active_incremental_base_slot = file_info.full_slot
+                state.recovery_grace_active = True
 
                 if not has_incremental_in_candidate and active_full_slot is not None:
                     self.logger.info(
@@ -1040,6 +1042,7 @@ class SnapshotFinder:
         local_full_age = state.current_slot - latest[1]
         state.local_full_snapshot_is_usable = 0 <= local_full_age <= self.config.maximum_local_snapshot_age
         state.active_incremental_base_slot = latest[1] if state.local_full_snapshot_is_usable else None
+        state.recovery_grace_active = False
         self.logger.info(
             "Found local full snapshot %s | full_snapshot_slot=%s | full_snapshot_age=%s | standalone_reusable=%s",
             state.local_full_snapshot_path,

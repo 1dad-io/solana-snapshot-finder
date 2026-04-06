@@ -12,6 +12,7 @@ All notable changes to this project will be documented in this file.
 - Handle peers snapshot-set-first so identical full+incremental pairs are exhausted together, avoiding repeated dead-end retries and avoiding a second full download in the same pass after a chosen pair collapses.
 - Enforce the global newer-snapshot search budget inside snapshot-set peer retries and replacement-incremental rescans so one dead snapshot set cannot consume the whole run unchecked.
 - Allow the immediate incremental recovery attempt for a full snapshot that already finished downloading in the current flow, instead of invalidating that completed full retroactively when the global newer-snapshot budget is crossed.
+- Continue retrying peers from the already-selected snapshot set after a full download completes, even if the global newer-snapshot budget is crossed, while still preventing any switch to a different snapshot set after the budget expires.
 
 ### Changed
 - Align `.gitignore` and `.dockerignore` with current snapshot archive formats by removing `*.tar` and adding `*.lz4`.
