@@ -476,6 +476,7 @@ class SnapshotFinder:
         state: ScanState,
         tried_urls: set[str],
         deadline_monotonic: float,
+        allow_budget_overrun: bool,
     ) -> list[tuple[str, Path]]:
         retry_state = ScanState(
             current_slot=state.current_slot,
@@ -485,7 +486,11 @@ class SnapshotFinder:
         )
         self._load_runtime_blacklist(retry_state)
         self._load_local_full_snapshot(retry_state)
-        candidates = self._rescan_candidates(retry_state, deadline_monotonic=deadline_monotonic)
+        candidates = self._rescan_candidates(
+            retry_state,
+            deadline_monotonic=deadline_monotonic,
+            allow_budget_overrun=allow_budget_overrun,
+        )
         if not candidates:
             return []
 
@@ -519,8 +524,14 @@ class SnapshotFinder:
         compatible_incrementals.sort(key=lambda item: (-item[0], item[1]))
         return [(url, target_dir) for _, _, url, target_dir in compatible_incrementals]
 
-    def _rescan_candidates(self, state: ScanState, *, deadline_monotonic: float) -> list[SnapshotCandidate]:
-        if self._budget_expired(deadline_monotonic):
+    def _rescan_candidates(
+        self,
+        state: ScanState,
+        *,
+        deadline_monotonic: float,
+        allow_budget_overrun: bool,
+    ) -> list[SnapshotCandidate]:
+        if self._budget_expired(deadline_monotonic) and not allow_budget_overrun:
             return []
 
         rpc_nodes = sorted(set(self.get_all_rpc_ips(state, with_private_rpc=self.config.with_private_rpc)))
@@ -551,18 +562,20 @@ class SnapshotFinder:
         state: ScanState,
         tried_urls: set[str],
         deadline_monotonic: float,
+        allow_budget_overrun: bool,
     ) -> bool:
         replacements = self._find_replacement_incremental_candidates(
             full_slot=full_slot,
             state=state,
             tried_urls=tried_urls,
             deadline_monotonic=deadline_monotonic,
+            allow_budget_overrun=allow_budget_overrun,
         )
         if not replacements:
             return False
 
         for download_url, target_dir in replacements:
-            if self._budget_expired(deadline_monotonic):
+            if self._budget_expired(deadline_monotonic) and not allow_budget_overrun:
                 self.logger.warning(
                     "Stopping replacement incremental attempts for full slot %s because the newer snapshot search budget is exhausted",
                     full_slot,
@@ -620,7 +633,8 @@ class SnapshotFinder:
         )
 
         for relative_path in candidate.files_to_download:
-            self._check_budget_or_raise(deadline_monotonic, "processing snapshot candidate files")
+            if not full_downloaded_in_this_run:
+                self._check_budget_or_raise(deadline_monotonic, "processing snapshot candidate files")
             file_info = parse_snapshot_filename(relative_path)
 
             if (
@@ -664,6 +678,7 @@ class SnapshotFinder:
                         state=state,
                         tried_urls=tried_incremental_urls,
                         deadline_monotonic=deadline_monotonic,
+                        allow_budget_overrun=full_downloaded_in_this_run,
                     ):
                         continue
 
@@ -679,7 +694,8 @@ class SnapshotFinder:
                         url=download_url,
                     )
 
-            self._check_budget_or_raise(deadline_monotonic, "starting a snapshot download")
+            if not full_downloaded_in_this_run:
+                self._check_budget_or_raise(deadline_monotonic, "starting a snapshot download")
             self.logger.info("Downloading %s to %s", download_url, target_dir)
 
             try:
@@ -695,6 +711,7 @@ class SnapshotFinder:
                         state=state,
                         tried_urls=tried_incremental_urls,
                         deadline_monotonic=deadline_monotonic,
+                        allow_budget_overrun=full_downloaded_in_this_run,
                     ):
                         continue
 
@@ -733,6 +750,7 @@ class SnapshotFinder:
                         state=state,
                         tried_urls=tried_incremental_urls,
                         deadline_monotonic=deadline_monotonic,
+                        allow_budget_overrun=True,
                     ):
                         continue
 
