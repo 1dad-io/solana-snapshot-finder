@@ -479,8 +479,15 @@ class SnapshotFinder:
         deadline_monotonic: float,
         allow_budget_overrun: bool,
     ) -> list[tuple[str, Path]]:
+        refreshed_current_slot = state.current_slot
+        if not self.config.specific_slot:
+            live_slot = self.get_current_slot()
+            if live_slot is not None:
+                refreshed_current_slot = live_slot
+                state.current_slot = live_slot
+
         retry_state = ScanState(
-            current_slot=state.current_slot,
+            current_slot=refreshed_current_slot,
             unsuitable_servers=set(state.unsuitable_servers),
             runtime_blacklist=set(state.runtime_blacklist),
             active_incremental_base_slot=full_slot,
@@ -655,7 +662,6 @@ class SnapshotFinder:
             target_dir = self.get_download_dir(file_info)
 
             if file_info.kind == "incremental":
-                tried_incremental_urls.add(download_url)
                 if active_full_slot is None:
                     self.logger.warning(
                         "Skipping incremental snapshot because no matching full snapshot is available yet: %s",
@@ -670,6 +676,34 @@ class SnapshotFinder:
                         download_url,
                     )
                     continue
+
+                if allow_budget_overrun:
+                    self.logger.info(
+                        "Full snapshot slot %s is already available locally; refreshing incremental discovery for that base instead of trusting the originally advertised incremental path",
+                        active_full_slot,
+                    )
+                    if self._download_replacement_incremental(
+                        full_slot=active_full_slot,
+                        state=state,
+                        tried_urls=tried_incremental_urls,
+                        deadline_monotonic=deadline_monotonic,
+                        allow_budget_overrun=allow_budget_overrun,
+                    ):
+                        continue
+
+                    if self._is_full_snapshot_standalone_usable(full_slot=active_full_slot, current_slot=state.current_slot):
+                        self.logger.warning(
+                            "No compatible refreshed incremental snapshot was found; keeping the available standalone-usable full snapshot as the bootstrap-ready result for full slot %s",
+                            active_full_slot,
+                        )
+                        continue
+
+                    raise DownloadError(
+                        "compatible incremental snapshot is still required because the active full snapshot is older than --maximum-local-snapshot-age",
+                        url=download_url,
+                    )
+
+                tried_incremental_urls.add(download_url)
                 if not self._snapshot_file_still_available(download_url):
                     self.logger.warning(
                         "Incremental snapshot disappeared before download; retrying search for a newer compatible incremental for full slot %s",

@@ -5,6 +5,7 @@ All notable changes to this project will be documented in this file.
 ## v0.4.3
 
 ### Fixed
+- After a full snapshot finishes downloading, stop trusting the originally discovered incremental path and refresh incremental discovery for that full base, so long mainnet-beta full downloads do not fail on incrementals that were naturally purged during the full transfer.
 - Honor active recovery grace across later peers in the same snapshot set after a full download completes, so incremental attempts are still made even after the global newer-snapshot budget has expired.
 - Avoid blacklisting same-set peers without a real incremental attempt when the active full snapshot was already downloaded in the current run.
 
