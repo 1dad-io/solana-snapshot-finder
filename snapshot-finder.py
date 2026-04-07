@@ -155,7 +155,7 @@ class SnapshotFinder:
     def run(self) -> int:
         self._ensure_paths()
 
-        self.logger.info("Version: 0.4.2")
+        self.logger.info("Version: 0.4.3")
         self.logger.info("https://github.com/1dad-io/solana-snapshot-finder")
         self.logger.info(
             "Configuration:\n"
@@ -632,9 +632,10 @@ class SnapshotFinder:
             parse_snapshot_filename(path).kind == "incremental"
             for path in candidate.files_to_download
         )
+        allow_budget_overrun = state.recovery_grace_active
 
         for relative_path in candidate.files_to_download:
-            if not full_downloaded_in_this_run:
+            if not allow_budget_overrun:
                 self._check_budget_or_raise(deadline_monotonic, "processing snapshot candidate files")
             file_info = parse_snapshot_filename(relative_path)
 
@@ -679,7 +680,7 @@ class SnapshotFinder:
                         state=state,
                         tried_urls=tried_incremental_urls,
                         deadline_monotonic=deadline_monotonic,
-                        allow_budget_overrun=full_downloaded_in_this_run,
+                        allow_budget_overrun=allow_budget_overrun,
                     ):
                         continue
 
@@ -695,14 +696,14 @@ class SnapshotFinder:
                         url=download_url,
                     )
 
-            if not full_downloaded_in_this_run:
+            if not allow_budget_overrun:
                 self._check_budget_or_raise(deadline_monotonic, "starting a snapshot download")
             self.logger.info("Downloading %s to %s", download_url, target_dir)
 
             try:
                 self.download(download_url, target_dir)
             except DownloadError as exc:
-                if file_info.kind == "incremental" and (full_downloaded_in_this_run or state.local_full_snapshot_is_usable):
+                if file_info.kind == "incremental" and (allow_budget_overrun or state.local_full_snapshot_is_usable):
                     self.logger.warning(
                         "Incremental snapshot became unavailable during download; retrying search for a newer compatible incremental for full slot %s",
                         active_full_slot,
@@ -712,7 +713,7 @@ class SnapshotFinder:
                         state=state,
                         tried_urls=tried_incremental_urls,
                         deadline_monotonic=deadline_monotonic,
-                        allow_budget_overrun=full_downloaded_in_this_run,
+                        allow_budget_overrun=allow_budget_overrun,
                     ):
                         continue
 
@@ -732,6 +733,7 @@ class SnapshotFinder:
 
             if file_info.kind == "full":
                 full_downloaded_in_this_run = True
+                allow_budget_overrun = True
                 active_full_slot = file_info.full_slot
                 state.local_full_snapshot_slot = file_info.full_slot
                 state.local_full_snapshot_path = target_dir / file_info.filename

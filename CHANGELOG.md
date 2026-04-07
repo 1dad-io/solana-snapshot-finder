@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## v0.4.3
+
+### Fixed
+- Honor active recovery grace across later peers in the same snapshot set after a full download completes, so incremental attempts are still made even after the global newer-snapshot budget has expired.
+- Avoid blacklisting same-set peers without a real incremental attempt when the active full snapshot was already downloaded in the current run.
+
 ## v0.4.2
 
 ### Fixed
