@@ -589,25 +589,26 @@ class SnapshotFinder:
         if not failures:
             return
 
-        sample = ", ".join(f"{url} ({reason})" for url, reason in failures[:3])
-        remaining = len(failures) - 3
-        if remaining > 0:
-            sample = f"{sample}, +{remaining} more"
+        success_rpc = None
+        if success_url is not None:
+            parsed = urlparse(success_url)
+            if parsed.hostname and parsed.port:
+                success_rpc = f"{parsed.hostname}:{parsed.port}"
+            else:
+                success_rpc = success_url
 
-        if success_url is None:
+        if success_rpc is None:
             self.logger.warning(
-                "Incremental snapshot attempts failed for full slot %s across %s peer(s): %s",
+                "Incremental snapshot attempts failed: full_slot=%s | failed_peers=%s",
                 full_slot,
                 len(failures),
-                sample,
             )
         else:
             self.logger.warning(
-                "Incremental snapshot attempts hit %s failed peer(s) before success for full slot %s: %s | success=%s",
+                "Incremental snapshot retries before success: failed_peers=%s | full_slot=%s | success=%s",
                 len(failures),
                 full_slot,
-                sample,
-                success_url,
+                success_rpc,
             )
 
     def _download_incremental(
