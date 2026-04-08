@@ -573,6 +573,43 @@ class SnapshotFinder:
 
         return sorted(state.candidates, key=lambda item: getattr(item, self.config.sort_order))
 
+    def _format_incremental_attempt_error(self, error: Exception) -> str:
+        error_text = str(error)
+        if "429 Client Error" in error_text:
+            return "429 Too Many Requests"
+        return error_text
+
+    def _log_incremental_attempt_failures(
+        self,
+        *,
+        full_slot: int,
+        failures: list[tuple[str, str]],
+        success_url: Optional[str] = None,
+    ) -> None:
+        if not failures:
+            return
+
+        sample = ", ".join(f"{url} ({reason})" for url, reason in failures[:3])
+        remaining = len(failures) - 3
+        if remaining > 0:
+            sample = f"{sample}, +{remaining} more"
+
+        if success_url is None:
+            self.logger.warning(
+                "Incremental snapshot attempts failed for full slot %s across %s peer(s): %s",
+                full_slot,
+                len(failures),
+                sample,
+            )
+        else:
+            self.logger.warning(
+                "Incremental snapshot attempts hit %s failed peer(s) before success for full slot %s: %s | success=%s",
+                len(failures),
+                full_slot,
+                sample,
+                success_url,
+            )
+
     def _download_incremental(
         self,
         *,
@@ -592,12 +629,15 @@ class SnapshotFinder:
         if not incremental_candidates:
             return False
 
+        failures: list[tuple[str, str]] = []
+
         for download_url, target_dir in incremental_candidates:
             if self._budget_expired(deadline_monotonic) and not allow_budget_overrun:
                 self.logger.warning(
                     "Stopping incremental attempts for full slot %s because the newer snapshot search budget is exhausted",
                     full_slot,
                 )
+                self._log_incremental_attempt_failures(full_slot=full_slot, failures=failures)
                 return False
 
             tried_urls.add(download_url)
@@ -610,6 +650,11 @@ class SnapshotFinder:
             )
             try:
                 self.download(download_url, target_dir)
+                self._log_incremental_attempt_failures(
+                    full_slot=full_slot,
+                    failures=failures,
+                    success_url=download_url,
+                )
                 effective_age = state.current_slot - full_slot
                 parsed_incremental = parse_snapshot_filename(download_url)
                 if parsed_incremental.kind == "incremental":
@@ -622,16 +667,13 @@ class SnapshotFinder:
                     )
                 return True
             except DownloadError as exc:
-                self.logger.warning(
-                    "Incremental snapshot download failed: %s (%s)",
-                    exc.url,
-                    exc,
-                )
+                failures.append((exc.url, self._format_incremental_attempt_error(exc)))
                 if rpc_address:
                     state.unsuitable_servers.add(rpc_address)
                     self._add_to_runtime_blacklist(rpc_address, reason="incremental_download_failed")
                 continue
 
+        self._log_incremental_attempt_failures(full_slot=full_slot, failures=failures)
         return False
 
 
