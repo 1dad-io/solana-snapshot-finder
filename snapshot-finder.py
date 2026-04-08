@@ -180,18 +180,10 @@ class SnapshotFinder:
 
         with_private_rpc = self.config.with_private_rpc
         search_started_at = time.monotonic()
-        newer_snapshot_deadline = search_started_at + self.config.newer_snapshot_timeout_sec
         next_blacklist_clear_at = search_started_at + self.config.runtime_blacklist_ttl_sec
         iteration = 1
 
-        while time.monotonic() < newer_snapshot_deadline:
-            remaining_budget = max(0, int(newer_snapshot_deadline - time.monotonic()))
-            self.logger.info(
-                "Search iteration: %s. Remaining newer snapshot budget: %ss",
-                iteration,
-                remaining_budget,
-            )
-
+        while True:
             state = ScanState()
             state.current_slot = self.config.specific_slot or self.get_current_slot()
 
@@ -209,14 +201,31 @@ class SnapshotFinder:
 
             self._load_runtime_blacklist(state)
             self._load_local_full_snapshot(state)
+
+            discovery_started_at = time.monotonic()
+            rpc_nodes = sorted(set(self.get_all_rpc_ips(state, with_private_rpc=with_private_rpc)))
+            discovery_elapsed = time.monotonic() - discovery_started_at
+            newer_snapshot_deadline = time.monotonic() + self.config.newer_snapshot_timeout_sec
+            remaining_budget = max(0, math.ceil(newer_snapshot_deadline - time.monotonic()))
+            self.logger.info(
+                "Discovery pass: %s. RPC discovery took %.1fs. Selection budget: %ss",
+                iteration,
+                discovery_elapsed,
+                remaining_budget,
+            )
+
             result = self._scan_and_download(
                 state,
                 with_private_rpc=with_private_rpc,
                 deadline_monotonic=newer_snapshot_deadline,
+                preloaded_rpc_nodes=rpc_nodes,
             )
             if result == 0:
                 self.logger.info("Done")
                 return 0
+
+            if time.monotonic() >= newer_snapshot_deadline:
+                break
 
             with_private_rpc = True
             iteration += 1
@@ -242,7 +251,7 @@ class SnapshotFinder:
             )
 
     def _scan_rpc_nodes(self, rpc_nodes: list[str], state: ScanState) -> None:
-        self.logger.info("Searching information about snapshots on all found RPCs")
+        self.logger.info("Scanning snapshots on discovered RPCs")
         with tqdm(total=len(rpc_nodes)) as progress_bar:
             self._pbar = progress_bar
             pool = ThreadPool(self.config.threads_count)
@@ -259,10 +268,13 @@ class SnapshotFinder:
         *,
         with_private_rpc: bool,
         deadline_monotonic: float,
+        preloaded_rpc_nodes: Optional[list[str]] = None,
     ) -> int:
-        rpc_nodes = sorted(set(self.get_all_rpc_ips(state, with_private_rpc=with_private_rpc)))
+        rpc_nodes = preloaded_rpc_nodes if preloaded_rpc_nodes is not None else sorted(
+            set(self.get_all_rpc_ips(state, with_private_rpc=with_private_rpc))
+        )
         self.logger.info(
-            "RPC servers in total: %s | Current slot number: %s",
+            "RPC servers: %s | current_slot=%s",
             len(rpc_nodes),
             state.current_slot,
         )
@@ -275,9 +287,7 @@ class SnapshotFinder:
 
         self.logger.info("Found suitable RPCs: %s", len(state.candidates))
         self.logger.info(
-            "Discard summary: discarded_by_archive_type=%s | discarded_by_latency=%s | "
-            "discarded_by_slot=%s | discarded_by_version=%s | discarded_by_timeout=%s | "
-            "discarded_by_unknown_error=%s",
+            "Discard summary: archive_type=%s | latency=%s | slot=%s | version=%s | timeout=%s | unknown_error=%s",
             state.stats.discarded_by_archive_type,
             state.stats.discarded_by_latency,
             state.stats.discarded_by_slot,
@@ -300,9 +310,7 @@ class SnapshotFinder:
             self._scan_rpc_nodes(rpc_nodes, fallback_state)
             self.logger.info("Found suitable fallback RPCs: %s", len(fallback_state.candidates))
             self.logger.info(
-                "Fallback discard summary: discarded_by_archive_type=%s | discarded_by_latency=%s | "
-                "discarded_by_slot=%s | discarded_by_version=%s | discarded_by_timeout=%s | "
-                "discarded_by_unknown_error=%s",
+                "Fallback discard summary: archive_type=%s | latency=%s | slot=%s | version=%s | timeout=%s | unknown_error=%s",
                 fallback_state.stats.discarded_by_archive_type,
                 fallback_state.stats.discarded_by_latency,
                 fallback_state.stats.discarded_by_slot,
@@ -367,7 +375,7 @@ class SnapshotFinder:
                 continue
 
             self.logger.info(
-                "%s/%s trying snapshot set advertised by %s across %s peer(s)",
+                "%s/%s trying snapshot set from %s across %s matching peer(s)",
                 group_index,
                 total_groups,
                 representative.snapshot_address,
@@ -403,12 +411,14 @@ class SnapshotFinder:
                     continue
 
                 self.logger.info(
-                    "%s/%s peer %s/%s checking the speed %s",
+                    "%s/%s peer %s/%s checking speed: rpc=%s | slots_diff=%s | %s",
                     group_index,
                     total_groups,
                     peer_index,
                     len(group_candidates),
-                    candidate,
+                    candidate.snapshot_address,
+                    candidate.slots_diff,
+                    self._candidate_kind_summary(candidate),
                 )
                 try:
                     speed_bytes_per_second = self.measure_speed(
@@ -427,11 +437,11 @@ class SnapshotFinder:
 
                 speed_human = convert_size(speed_bytes_per_second)
                 if speed_bytes_per_second < self.config.min_download_speed_mb * 1e6:
-                    self.logger.info("Too slow: candidate=%s speed=%s", candidate, speed_human)
+                    self.logger.info("Too slow: rpc=%s | slots_diff=%s | speed=%s/s", candidate.snapshot_address, candidate.slots_diff, speed_human)
                     state.unsuitable_servers.add(candidate.snapshot_address)
                     continue
 
-                self.logger.info("Suitable snapshot server found: candidate=%s speed=%s", candidate, speed_human)
+                self.logger.info("Found suitable snapshot server: rpc=%s | slots_diff=%s | speed=%s/s", candidate.snapshot_address, candidate.slots_diff, speed_human)
                 try:
                     self._download_candidate_files(
                         candidate,
@@ -493,7 +503,7 @@ class SnapshotFinder:
             active_incremental_base_slot=full_slot,
         )
         self._load_runtime_blacklist(retry_state)
-        self._load_local_full_snapshot(retry_state)
+        self._load_local_full_snapshot(retry_state, recovery_context=True)
         candidates = self._rescan_candidates(
             retry_state,
             deadline_monotonic=deadline_monotonic,
@@ -547,7 +557,7 @@ class SnapshotFinder:
             return []
 
         self.logger.info(
-            "Re-scanning %s RPC servers for a fresh replacement incremental snapshot",
+            "Re-scanning %s RPC servers for a fresh incremental snapshot",
             len(rpc_nodes),
         )
 
@@ -585,7 +595,7 @@ class SnapshotFinder:
         for download_url, target_dir in replacements:
             if self._budget_expired(deadline_monotonic) and not allow_budget_overrun:
                 self.logger.warning(
-                    "Stopping replacement incremental attempts for full slot %s because the newer snapshot search budget is exhausted",
+                    "Stopping incremental attempts for full slot %s because the newer snapshot search budget is exhausted",
                     full_slot,
                 )
                 return False
@@ -594,7 +604,7 @@ class SnapshotFinder:
             parsed = urlparse(download_url)
             rpc_address = f"{parsed.hostname}:{parsed.port}" if parsed.hostname and parsed.port else None
             self.logger.info(
-                "Found replacement incremental snapshot for full slot %s: %s",
+                "Found incremental snapshot for full slot %s: %s",
                 full_slot,
                 download_url,
             )
@@ -605,7 +615,7 @@ class SnapshotFinder:
                 if parsed_incremental.kind == "incremental":
                     effective_age = state.current_slot - parsed_incremental.snapshot_slot
                     self.logger.info(
-                        "Bootstrap-ready snapshot set prepared: full_slot=%s incremental_slot=%s effective_age=%s",
+                        "Snapshot set ready: full_slot=%s incremental_slot=%s effective_age=%s",
                         full_slot,
                         parsed_incremental.snapshot_slot,
                         effective_age,
@@ -613,7 +623,7 @@ class SnapshotFinder:
                 return True
             except DownloadError as exc:
                 self.logger.warning(
-                    "Replacement incremental snapshot download failed: %s (%s)",
+                    "Incremental snapshot download failed: %s (%s)",
                     exc.url,
                     exc,
                 )
@@ -648,14 +658,19 @@ class SnapshotFinder:
 
             if (
                 file_info.kind == "full"
-                and state.active_incremental_base_slot is not None
-                and file_info.full_slot == state.active_incremental_base_slot
+                and state.local_full_snapshot_slot is not None
+                and file_info.full_slot == state.local_full_snapshot_slot
+                and state.local_full_snapshot_path is not None
+                and state.local_full_snapshot_path.exists()
             ):
                 self.logger.info(
-                    "Skipping download of already-present local full snapshot %s; reusing it as the incremental recovery base",
+                    "Skipping download of full snapshot %s",
                     relative_path,
                 )
-                active_full_slot = state.active_incremental_base_slot
+                active_full_slot = state.local_full_snapshot_slot
+                state.active_incremental_base_slot = state.local_full_snapshot_slot
+                state.recovery_grace_active = True
+                allow_budget_overrun = True
                 continue
 
             download_url = self._build_download_url(candidate.snapshot_address, relative_path)
@@ -679,7 +694,7 @@ class SnapshotFinder:
 
                 if allow_budget_overrun:
                     self.logger.info(
-                        "Full snapshot slot %s is already available locally; refreshing incremental discovery for that base instead of trusting the originally advertised incremental path",
+                        "Full snapshot slot %s is already available locally; refreshing incremental discovery for that base",
                         active_full_slot,
                     )
                     if self._download_replacement_incremental(
@@ -693,7 +708,7 @@ class SnapshotFinder:
 
                     if self._is_full_snapshot_standalone_usable(full_slot=active_full_slot, current_slot=state.current_slot):
                         self.logger.warning(
-                            "No compatible refreshed incremental snapshot was found; keeping the available standalone-usable full snapshot as the bootstrap-ready result for full slot %s",
+                            "No compatible incremental snapshot was found; keeping the available standalone-usable full snapshot for full slot %s",
                             active_full_slot,
                         )
                         continue
@@ -719,10 +734,7 @@ class SnapshotFinder:
                         continue
 
                     if self._is_full_snapshot_standalone_usable(full_slot=active_full_slot, current_slot=state.current_slot):
-                        self.logger.warning(
-                            "No compatible replacement incremental snapshot was found; keeping the available standalone-usable full snapshot as the bootstrap-ready result and skipping %s",
-                            download_url,
-                        )
+                        self._log_standalone_full_fallback_skip(download_url)
                         continue
 
                     raise DownloadError(
@@ -752,11 +764,7 @@ class SnapshotFinder:
                         continue
 
                     if self._is_full_snapshot_standalone_usable(full_slot=active_full_slot, current_slot=state.current_slot):
-                        self.logger.warning(
-                            "No compatible replacement incremental snapshot was found; keeping the available standalone-usable full snapshot as the bootstrap-ready result and skipping %s (%s)",
-                            exc.url,
-                            exc,
-                        )
+                        self._log_standalone_full_fallback_skip(exc.url, exc)
                         continue
 
                     raise DownloadError(
@@ -794,7 +802,7 @@ class SnapshotFinder:
 
                     if self._is_full_snapshot_standalone_usable(full_slot=active_full_slot, current_slot=state.current_slot):
                         self.logger.info(
-                            "Standalone full snapshot is bootstrap-ready under --maximum-local-snapshot-age: full_slot=%s effective_age=%s",
+                            "Standalone full snapshot is ready under --maximum-local-snapshot-age: full_slot=%s effective_age=%s",
                             active_full_slot,
                             state.current_slot - active_full_slot,
                         )
@@ -822,6 +830,15 @@ class SnapshotFinder:
             return False
         full_age = current_slot - full_slot
         return 0 <= full_age <= self.config.maximum_local_snapshot_age
+
+    def _log_standalone_full_fallback_skip(self, snapshot_ref: str, error: Optional[Exception] = None) -> None:
+        message = (
+            "No compatible incremental snapshot was found; keeping the available standalone-usable full snapshot and skipping %s"
+        )
+        if error is None:
+            self.logger.warning(message, snapshot_ref)
+        else:
+            self.logger.warning(f"{message} (%s)", snapshot_ref, error)
 
 
 
@@ -917,7 +934,7 @@ class SnapshotFinder:
         if not self.runtime_blacklist_path.exists():
             return
         self.logger.info(
-            "Clearing runtime blacklist after %ss to mirror bootstrap-style peer recovery",
+            "Clearing runtime blacklist after %ss for peer recovery",
             self.config.runtime_blacklist_ttl_sec,
         )
         self._write_runtime_blacklist_entries({})
@@ -1058,9 +1075,9 @@ class SnapshotFinder:
         }
         output_path = self.config.snapshots_path / "snapshot.json"
         output_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-        self.logger.info("All data is saved to json file - %s", output_path)
+        self.logger.info("Saved snapshot data to %s", output_path)
 
-    def _load_local_full_snapshot(self, state: ScanState) -> None:
+    def _load_local_full_snapshot(self, state: ScanState, *, recovery_context: bool = False) -> None:
         latest = self._find_latest_local_full_snapshot()
         state.local_full_snapshot_path = None
         state.local_full_snapshot_slot = None
@@ -1079,13 +1096,21 @@ class SnapshotFinder:
         state.local_full_snapshot_is_usable = 0 <= local_full_age <= self.config.maximum_local_snapshot_age
         state.active_incremental_base_slot = latest[1] if state.local_full_snapshot_is_usable else None
         state.recovery_grace_active = False
-        self.logger.info(
-            "Found local full snapshot %s | full_snapshot_slot=%s | full_snapshot_age=%s | standalone_reusable=%s",
-            state.local_full_snapshot_path,
-            state.local_full_snapshot_slot,
-            local_full_age,
-            state.local_full_snapshot_is_usable,
-        )
+        if recovery_context:
+            self.logger.info(
+                "Using local full snapshot slot %s as recovery base | age=%s | standalone_reusable=%s",
+                state.local_full_snapshot_slot,
+                local_full_age,
+                state.local_full_snapshot_is_usable,
+            )
+        else:
+            self.logger.info(
+                "Local full snapshot %s | slot=%s | age=%s | standalone_reusable=%s",
+                state.local_full_snapshot_path,
+                state.local_full_snapshot_slot,
+                local_full_age,
+                state.local_full_snapshot_is_usable,
+            )
 
     def _find_latest_local_full_snapshot(self) -> Optional[tuple[Path, int]]:
         latest: Optional[tuple[Path, int]] = None
@@ -1314,6 +1339,27 @@ class SnapshotFinder:
 
         return [(key, grouped[key]) for key in ordered_keys]
 
+    def _candidate_kind_summary(self, candidate: SnapshotCandidate) -> str:
+        has_full = False
+        has_incremental = False
+        for relative_path in candidate.files_to_download:
+            try:
+                file_info = parse_snapshot_filename(relative_path)
+            except ValueError:
+                continue
+            if file_info.kind == "full":
+                has_full = True
+            elif file_info.kind == "incremental":
+                has_incremental = True
+
+        if has_full and has_incremental:
+            return "full+incremental"
+        if has_full:
+            return "full"
+        if has_incremental:
+            return "incremental"
+        return f"files={len(candidate.files_to_download)}"
+
     def _is_blacklisted(self, candidate: SnapshotCandidate) -> bool:
         if not self.config.blacklist:
             return False
@@ -1421,7 +1467,7 @@ class SnapshotFinder:
                             else:
                                 slow_since = None
 
-                self.logger.info("Rename the downloaded file %s --> %s", temp_path, final_path)
+                self.logger.info("Renamed %s -> %s", temp_path, final_path)
                 os.rename(temp_path, final_path)
 
         except requests.HTTPError as exc:
@@ -1483,7 +1529,7 @@ def convert_size(size_bytes: float) -> str:
     index = int(math.floor(math.log(size_bytes, 1024)))
     power = math.pow(1024, index)
     size = round(size_bytes / power, 2)
-    return f"{size} {size_names[index]}"
+    return f"{size}{size_names[index]}"
 
 
 def resolve_domain(domain: str, logger: logging.Logger) -> list[str]:
