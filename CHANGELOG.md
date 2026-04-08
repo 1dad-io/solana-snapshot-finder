@@ -5,9 +5,16 @@ All notable changes to this project will be documented in this file.
 ## v0.4.3
 
 ### Fixed
+- Start the newer-snapshot selection budget after RPC discovery completes, so the 180-second search budget is not accidentally consumed by peer discovery time.
 - After a full snapshot finishes downloading, stop trusting the originally discovered incremental path and refresh incremental discovery for that full base, so long mainnet-beta full downloads do not fail on incrementals that were naturally purged during the full transfer.
-- Honor active recovery grace across later peers in the same snapshot set after a full download completes, so incremental attempts are still made even after the global newer-snapshot budget has expired.
+- Keep trying incrementals for the already-selected full snapshot after the full download completes, including across later matching peers in the same snapshot set, instead of abandoning recovery too early.
+- Allow incremental recovery to continue after the global newer-snapshot budget expires once a usable full snapshot has already been downloaded in the current run.
 - Avoid blacklisting same-set peers without a real incremental attempt when the active full snapshot was already downloaded in the current run.
+- Fall back across equivalent incremental peers when some snapshot servers return HTTP 429 rate limits, instead of failing the whole recovery immediately.
+
+### Changed
+- Simplified incremental helper naming by dropping leftover `replacement` terminology from the code path that now treats any newly fetched incremental as the new recovery state.
+- Polished operator-facing logs throughout the selection and recovery flow, including clearer discovery-pass wording, snapshot-set grouping logs, compact candidate speed-check logs, shorter local-full and rename messages, and concise incremental retry summaries.
 
 ## v0.4.2
 
