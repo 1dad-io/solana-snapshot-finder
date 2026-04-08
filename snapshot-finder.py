@@ -480,7 +480,7 @@ class SnapshotFinder:
         return 1
 
 
-    def _find_replacement_incremental_candidates(
+    def _find_incremental_candidates(
         self,
         *,
         full_slot: int,
@@ -573,7 +573,7 @@ class SnapshotFinder:
 
         return sorted(state.candidates, key=lambda item: getattr(item, self.config.sort_order))
 
-    def _download_replacement_incremental(
+    def _download_incremental(
         self,
         *,
         full_slot: int,
@@ -582,17 +582,17 @@ class SnapshotFinder:
         deadline_monotonic: float,
         allow_budget_overrun: bool,
     ) -> bool:
-        replacements = self._find_replacement_incremental_candidates(
+        incremental_candidates = self._find_incremental_candidates(
             full_slot=full_slot,
             state=state,
             tried_urls=tried_urls,
             deadline_monotonic=deadline_monotonic,
             allow_budget_overrun=allow_budget_overrun,
         )
-        if not replacements:
+        if not incremental_candidates:
             return False
 
-        for download_url, target_dir in replacements:
+        for download_url, target_dir in incremental_candidates:
             if self._budget_expired(deadline_monotonic) and not allow_budget_overrun:
                 self.logger.warning(
                     "Stopping incremental attempts for full slot %s because the newer snapshot search budget is exhausted",
@@ -604,7 +604,7 @@ class SnapshotFinder:
             parsed = urlparse(download_url)
             rpc_address = f"{parsed.hostname}:{parsed.port}" if parsed.hostname and parsed.port else None
             self.logger.info(
-                "Found incremental snapshot for full slot %s: %s",
+                "Trying incremental snapshot for full slot %s: %s",
                 full_slot,
                 download_url,
             )
@@ -629,7 +629,7 @@ class SnapshotFinder:
                 )
                 if rpc_address:
                     state.unsuitable_servers.add(rpc_address)
-                    self._add_to_runtime_blacklist(rpc_address, reason="replacement_incremental_failed")
+                    self._add_to_runtime_blacklist(rpc_address, reason="incremental_download_failed")
                 continue
 
         return False
@@ -697,7 +697,7 @@ class SnapshotFinder:
                         "Full snapshot slot %s is already available locally; refreshing incremental discovery for that base",
                         active_full_slot,
                     )
-                    if self._download_replacement_incremental(
+                    if self._download_incremental(
                         full_slot=active_full_slot,
                         state=state,
                         tried_urls=tried_incremental_urls,
@@ -724,7 +724,7 @@ class SnapshotFinder:
                         "Incremental snapshot disappeared before download; retrying search for a newer compatible incremental for full slot %s",
                         active_full_slot,
                     )
-                    if self._download_replacement_incremental(
+                    if self._download_incremental(
                         full_slot=active_full_slot,
                         state=state,
                         tried_urls=tried_incremental_urls,
@@ -754,7 +754,7 @@ class SnapshotFinder:
                         "Incremental snapshot became unavailable during download; retrying search for a newer compatible incremental for full slot %s",
                         active_full_slot,
                     )
-                    if active_full_slot is not None and self._download_replacement_incremental(
+                    if active_full_slot is not None and self._download_incremental(
                         full_slot=active_full_slot,
                         state=state,
                         tried_urls=tried_incremental_urls,
@@ -791,7 +791,7 @@ class SnapshotFinder:
                         "Full snapshot slot %s downloaded successfully; searching for a matching incremental snapshot",
                         active_full_slot,
                     )
-                    if self._download_replacement_incremental(
+                    if self._download_incremental(
                         full_slot=active_full_slot,
                         state=state,
                         tried_urls=tried_incremental_urls,
