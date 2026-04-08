@@ -599,15 +599,13 @@ class SnapshotFinder:
 
         if success_rpc is None:
             self.logger.warning(
-                "Incremental snapshot attempts failed: full_slot=%s | failed_peers=%s",
-                full_slot,
+                "Incremental snapshot failed across %s peer(s)",
                 len(failures),
             )
         else:
-            self.logger.warning(
-                "Incremental snapshot retries before success: failed_peers=%s | full_slot=%s | success=%s",
+            self.logger.info(
+                "Incremental snapshot retries before success: failed_peers=%s | success=%s",
                 len(failures),
-                full_slot,
                 success_rpc,
             )
 
