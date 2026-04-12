@@ -146,7 +146,7 @@ The tool writes:
 - The tool enforces `--min-download-speed` both during probing and during the real download
 - If a reusable local full snapshot exists, the tool switches to incremental-only recovery for that base
 - If an incremental disappears after a long full download, the tool can rescan and try a replacement incremental instead of restarting from scratch
-- The search uses a global time budget, but once a full download has already completed, the tool still tries to finish recovery for that chosen base
+- The search uses a global time budget, but once a full download has already started, the tool still tries to finish recovery for that chosen base
 
 ## Docker
 

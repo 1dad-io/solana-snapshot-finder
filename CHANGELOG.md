@@ -2,19 +2,29 @@
 
 All notable changes to this project will be documented in this file.
 
+## v0.4.4
+
+### Fixed
+- Exclude real snapshot download time from the newer snapshot selection budget once execution has started for the chosen snapshot set.
+- Keep retrying peers from the already selected snapshot set after a late full download failure, instead of letting the expired 180s selection budget abort same set recovery immediately.
+- Track the selected snapshot set root slot during execution so post download failures no longer log `full slot None` when the run is still recovering within the chosen set.
+
+### Changed
+- Clarified the phase boundary between snapshot set selection and download execution so the time budget only governs discovery, grouping, speed checks, and set selection, while in-flight download recovery stays on the chosen set.
+
 ## v0.4.3
 
 ### Fixed
-- Start the newer-snapshot selection budget after RPC discovery completes, so the 180-second search budget is not accidentally consumed by peer discovery time.
+- Start the newer snapshot selection budget after RPC discovery completes, so the 180s search budget is not accidentally consumed by peer discovery time.
 - After a full snapshot finishes downloading, stop trusting the originally discovered incremental path and refresh incremental discovery for that full base, so long mainnet-beta full downloads do not fail on incrementals that were naturally purged during the full transfer.
-- Keep trying incrementals for the already-selected full snapshot after the full download completes, including across later matching peers in the same snapshot set, instead of abandoning recovery too early.
-- Allow incremental recovery to continue after the global newer-snapshot budget expires once a usable full snapshot has already been downloaded in the current run.
-- Avoid blacklisting same-set peers without a real incremental attempt when the active full snapshot was already downloaded in the current run.
+- Keep trying incrementals for the already selected full snapshot after the full download completes, including across later matching peers in the same snapshot set, instead of abandoning recovery too early.
+- Allow incremental recovery to continue after the global newer snapshot budget expires once a usable full snapshot has already been downloaded in the current run.
+- Avoid blacklisting same set peers without a real incremental attempt when the active full snapshot was already downloaded in the current run.
 - Fall back across equivalent incremental peers when some snapshot servers return HTTP 429 rate limits, instead of failing the whole recovery immediately.
 
 ### Changed
 - Simplified incremental helper naming by dropping leftover `replacement` terminology from the code path that now treats any newly fetched incremental as the new recovery state.
-- Polished operator-facing logs throughout the selection and recovery flow, including clearer discovery-pass wording, snapshot-set grouping logs, compact candidate speed-check logs, shorter local-full and rename messages, and concise incremental retry summaries.
+- Polished logs throughout the selection and recovery flow.
 
 ## v0.4.2
 
@@ -24,9 +34,9 @@ All notable changes to this project will be documented in this file.
 - Stop treating `--maximum-local-snapshot-age` as a hard filter for older remote full snapshots during discovery when those full snapshots can still be paired with a recent enough incremental snapshot.
 - Activate incremental-only recovery only for a reusable local full snapshot or for a full snapshot downloaded during the current search flow, instead of getting stuck on stale non-reusable local full snapshots found on disk.
 - Handle peers snapshot-set-first so identical full+incremental pairs are exhausted together, avoiding repeated dead-end retries and avoiding a second full download in the same pass after a chosen pair collapses.
-- Enforce the global newer-snapshot search budget inside snapshot-set peer retries and replacement-incremental rescans so one dead snapshot set cannot consume the whole run unchecked.
-- Allow the immediate incremental recovery attempt for a full snapshot that already finished downloading in the current flow, instead of invalidating that completed full retroactively when the global newer-snapshot budget is crossed.
-- Continue retrying peers from the already-selected snapshot set after a full download completes, even if the global newer-snapshot budget is crossed, while still preventing any switch to a different snapshot set after the budget expires.
+- Enforce the global newer snapshot search budget inside snapshot set peer retries and replacement incremental rescans so one dead snapshot set cannot consume the whole run unchecked.
+- Allow the immediate incremental recovery attempt for a full snapshot that already finished downloading in the current flow, instead of invalidating that completed full retroactively when the global newer snapshot budget is crossed.
+- Continue retrying peers from the already selected snapshot set after a full download completes, even if the global newer snapshot budget is crossed, while still preventing any switch to a different snapshot set after the budget expires.
 
 ### Changed
 - Align `.gitignore` and `.dockerignore` with current snapshot archive formats by removing `*.tar` and adding `*.lz4`.
@@ -55,7 +65,7 @@ All notable changes to this project will be documented in this file.
 - Preserved reusable local full snapshots as the recovery base when compatible.
 - Proactively searched for a matching incremental after downloading a full snapshot.
 - Preferred the freshest compatible replacement incremental during recovery.
-- Improved bootstrap-readiness logging for standalone full snapshots and full-plus-incremental recovery.
+- Improved logging for standalone full snapshots and full-plus-incremental recovery.
 
 ### Fixed
 - Avoid exiting successfully with a full snapshot that is still too old and still requires a compatible incremental.

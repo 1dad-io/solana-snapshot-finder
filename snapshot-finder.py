@@ -138,6 +138,8 @@ class ScanState:
     local_full_snapshot_is_usable: bool = False
     active_incremental_base_slot: Optional[int] = None
     recovery_grace_active: bool = False
+    execution_grace_active: bool = False
+    selected_snapshot_set_root_slot: Optional[int] = None
     runtime_blacklist: set[str] = field(default_factory=set)
     candidates: list[SnapshotCandidate] = field(default_factory=list)
     stats: AttemptStats = field(default_factory=AttemptStats)
@@ -155,7 +157,7 @@ class SnapshotFinder:
     def run(self) -> int:
         self._ensure_paths()
 
-        self.logger.info("Version: 0.4.3")
+        self.logger.info("Version: 0.4.4")
         self.logger.info("https://github.com/1dad-io/solana-snapshot-finder")
         self.logger.info(
             "Configuration:\n"
@@ -360,6 +362,7 @@ class SnapshotFinder:
                 return 1
 
             representative = group_candidates[0]
+            representative_root_slot = self._candidate_root_full_slot(representative)
 
             if (
                 state.active_incremental_base_slot is not None
@@ -374,6 +377,20 @@ class SnapshotFinder:
                 )
                 continue
 
+            if (
+                state.execution_grace_active
+                and state.selected_snapshot_set_root_slot is not None
+                and representative_root_slot != state.selected_snapshot_set_root_slot
+            ):
+                self.logger.info(
+                    "%s/%s skipping snapshot set from %s because execution is already active for full slot %s",
+                    group_index,
+                    total_groups,
+                    representative.snapshot_address,
+                    state.selected_snapshot_set_root_slot,
+                )
+                continue
+
             self.logger.info(
                 "%s/%s trying snapshot set from %s across %s matching peer(s)",
                 group_index,
@@ -382,13 +399,14 @@ class SnapshotFinder:
                 len(group_candidates),
             )
 
+            state.selected_snapshot_set_root_slot = representative_root_slot
             group_had_active_base_failure = False
 
             for peer_index, candidate in enumerate(group_candidates, start=1):
-                if self._budget_expired(deadline_monotonic) and not state.recovery_grace_active:
+                if self._budget_expired(deadline_monotonic) and not state.recovery_grace_active and not state.execution_grace_active:
                     self.logger.warning(
                         "Stopping retries for snapshot set rooted at full slot %s because the newer snapshot search budget is exhausted",
-                        state.active_incremental_base_slot,
+                        state.selected_snapshot_set_root_slot,
                     )
                     return 1
 
@@ -458,19 +476,27 @@ class SnapshotFinder:
                     state.unsuitable_servers.add(candidate.snapshot_address)
                     self._add_to_runtime_blacklist(candidate.snapshot_address, reason="download_failed")
 
+                    candidate_root_slot = self._candidate_root_full_slot(candidate)
                     if (
-                        state.active_incremental_base_slot is not None
-                        and self._candidate_matches_local_full(candidate, state.active_incremental_base_slot)
+                        (state.active_incremental_base_slot is not None and self._candidate_matches_local_full(candidate, state.active_incremental_base_slot))
+                        or (state.execution_grace_active and state.selected_snapshot_set_root_slot is not None and candidate_root_slot == state.selected_snapshot_set_root_slot)
                     ):
                         group_had_active_base_failure = True
                     continue
 
             if group_had_active_base_failure:
-                self.logger.warning(
-                    "Exhausted all peers for snapshot set rooted at full slot %s without finding a compatible incremental. "
-                    "Keeping the already-downloaded full snapshot and returning to outer discovery instead of downloading a second full in the same pass",
-                    state.active_incremental_base_slot,
-                )
+                if state.active_incremental_base_slot is not None:
+                    self.logger.warning(
+                        "Exhausted all peers for snapshot set rooted at full slot %s without finding a compatible incremental. "
+                        "Keeping the already-downloaded full snapshot and returning to outer discovery instead of downloading a second full in the same pass",
+                        state.active_incremental_base_slot,
+                    )
+                else:
+                    self.logger.warning(
+                        "Exhausted all peers for snapshot set rooted at full slot %s after download/execution failures. "
+                        "Not switching to a different snapshot set in the same pass",
+                        state.selected_snapshot_set_root_slot,
+                    )
                 return 1
 
         self.logger.error(
@@ -785,6 +811,9 @@ class SnapshotFinder:
 
             if not allow_budget_overrun:
                 self._check_budget_or_raise(deadline_monotonic, "starting a snapshot download")
+            if file_info.kind == "full":
+                state.execution_grace_active = True
+                state.selected_snapshot_set_root_slot = file_info.full_slot
             self.logger.info("Downloading %s to %s", download_url, target_dir)
 
             try:
@@ -1125,6 +1154,9 @@ class SnapshotFinder:
         state.local_full_snapshot_is_usable = False
 
         if latest is None:
+            if not recovery_context:
+                state.execution_grace_active = False
+                state.selected_snapshot_set_root_slot = None
             self.logger.info(
                 "Cannot find any full local snapshots in %s --> the search will be carried out on full snapshots",
                 self.config.full_snapshot_archive_path,
@@ -1137,6 +1169,9 @@ class SnapshotFinder:
         state.local_full_snapshot_is_usable = 0 <= local_full_age <= self.config.maximum_local_snapshot_age
         state.active_incremental_base_slot = latest[1] if state.local_full_snapshot_is_usable else None
         state.recovery_grace_active = False
+        if not recovery_context:
+            state.execution_grace_active = False
+            state.selected_snapshot_set_root_slot = None
         if recovery_context:
             self.logger.info(
                 "Using local full snapshot slot %s as recovery base | age=%s | standalone_reusable=%s",
@@ -1350,6 +1385,21 @@ class SnapshotFinder:
                 return True
 
         return False
+
+    def _candidate_root_full_slot(self, candidate: SnapshotCandidate) -> Optional[int]:
+        full_slot = None
+        for relative_path in candidate.files_to_download:
+            try:
+                file_info = parse_snapshot_filename(relative_path)
+            except ValueError:
+                continue
+
+            if file_info.kind == "incremental" and file_info.base_slot is not None:
+                return file_info.base_slot
+            if file_info.kind == "full" and file_info.full_slot is not None:
+                full_slot = file_info.full_slot
+
+        return full_slot
 
     def _snapshot_set_key(self, candidate: SnapshotCandidate) -> tuple[tuple[str, Optional[int], Optional[int], int], ...]:
         key_parts: list[tuple[str, Optional[int], Optional[int], int]] = []
