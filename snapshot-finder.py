@@ -139,6 +139,7 @@ class ScanState:
     active_incremental_base_slot: Optional[int] = None
     recovery_grace_active: bool = False
     execution_grace_active: bool = False
+    active_full_downloaded_in_this_run: bool = False
     selected_snapshot_set_root_slot: Optional[int] = None
     runtime_blacklist: set[str] = field(default_factory=set)
     candidates: list[SnapshotCandidate] = field(default_factory=list)
@@ -737,6 +738,7 @@ class SnapshotFinder:
                 active_full_slot = state.local_full_snapshot_slot
                 state.active_incremental_base_slot = state.local_full_snapshot_slot
                 state.recovery_grace_active = True
+                state.active_full_downloaded_in_this_run = False
                 allow_budget_overrun = True
                 continue
 
@@ -761,7 +763,9 @@ class SnapshotFinder:
 
                 if allow_budget_overrun:
                     self.logger.info(
-                        "Full snapshot slot %s is already available locally; refreshing incremental discovery for that base",
+                        "Full snapshot slot %s downloaded successfully; refreshing incremental discovery for that base"
+                        if state.active_full_downloaded_in_this_run
+                        else "Full snapshot slot %s is already available locally; refreshing incremental discovery for that base",
                         active_full_slot,
                     )
                     if self._download_incremental(
@@ -855,6 +859,7 @@ class SnapshotFinder:
                 )
                 state.active_incremental_base_slot = file_info.full_slot
                 state.recovery_grace_active = True
+                state.active_full_downloaded_in_this_run = True
 
                 if not has_incremental_in_candidate and active_full_slot is not None:
                     self.logger.info(
@@ -1156,6 +1161,7 @@ class SnapshotFinder:
         if latest is None:
             if not recovery_context:
                 state.execution_grace_active = False
+                state.active_full_downloaded_in_this_run = False
                 state.selected_snapshot_set_root_slot = None
             self.logger.info(
                 "Cannot find any full local snapshots in %s --> the search will be carried out on full snapshots",
@@ -1171,6 +1177,7 @@ class SnapshotFinder:
         state.recovery_grace_active = False
         if not recovery_context:
             state.execution_grace_active = False
+            state.active_full_downloaded_in_this_run = False
             state.selected_snapshot_set_root_slot = None
         if recovery_context:
             self.logger.info(
